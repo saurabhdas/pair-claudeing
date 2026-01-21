@@ -104,6 +104,9 @@ export type ControlMessage = StartTerminalMessage | CloseTerminalMessage;
 export interface ControlHandshakeResponse {
   type: 'control_handshake';
   version: string;
+  hostname?: string;
+  username?: string;
+  workingDir?: string;
 }
 
 export interface TerminalStartedResponse {

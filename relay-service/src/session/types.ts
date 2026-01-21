@@ -69,7 +69,7 @@ export interface SessionData {
 
   // Control connection from paircoded
   controlWs: WebSocket | null;
-  controlHandshake: { version: string } | null;
+  controlHandshake: ControlHandshakeInfo | null;
 
   // Named terminals
   terminals: Map<string, Terminal>;
@@ -92,12 +92,19 @@ export interface TerminalInfo {
   hasDataConnection: boolean;
 }
 
+export interface ControlHandshakeInfo {
+  version: string;
+  hostname?: string;
+  username?: string;
+  workingDir?: string;
+}
+
 export interface SessionInfo {
   id: string;
   state: SessionState;
   createdAt: string;
   owner: SessionOwner | null;
-  controlHandshake: { version: string } | null;
+  controlHandshake: ControlHandshakeInfo | null;
   cols: number;
   rows: number;
   terminals: TerminalInfo[];

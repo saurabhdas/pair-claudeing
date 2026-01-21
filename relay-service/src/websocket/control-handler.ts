@@ -128,10 +128,15 @@ function handleControlMessage(
 
 function handleControlHandshake(
   session: import('../session/session.js').Session,
-  message: { type: 'control_handshake'; version: string }
+  message: { type: 'control_handshake'; version: string; hostname?: string; username?: string; workingDir?: string }
 ): void {
-  log.info({ sessionId: session.id, version: message.version }, 'received control handshake');
-  session.setControlHandshake({ version: message.version });
+  log.info({ sessionId: session.id, version: message.version, hostname: message.hostname }, 'received control handshake');
+  session.setControlHandshake({
+    version: message.version,
+    hostname: message.hostname,
+    username: message.username,
+    workingDir: message.workingDir,
+  });
 }
 
 function handleTerminalStarted(

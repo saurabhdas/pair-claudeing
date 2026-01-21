@@ -4,7 +4,7 @@
 
 import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
-import { SessionState, type SessionData, type SessionInfo, type SessionOwner, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
+import { SessionState, type SessionData, type SessionInfo, type SessionOwner, type ControlHandshakeInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
 
 // HandshakeMessage is used in setTerminalHandshake method
 import { createChildLogger } from '../utils/logger.js';
@@ -21,7 +21,7 @@ export class Session implements SessionData {
 
   // Control connection from paircoded
   public controlWs: WebSocket | null = null;
-  public controlHandshake: { version: string } | null = null;
+  public controlHandshake: ControlHandshakeInfo | null = null;
 
   // Named terminals
   public terminals: Map<string, Terminal> = new Map();
@@ -70,7 +70,7 @@ export class Session implements SessionData {
   /**
    * Set control handshake data.
    */
-  setControlHandshake(handshake: { version: string }): void {
+  setControlHandshake(handshake: ControlHandshakeInfo): void {
     this.controlHandshake = handshake;
     if (this.state === SessionState.PENDING) {
       this.state = SessionState.READY;

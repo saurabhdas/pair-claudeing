@@ -165,6 +165,13 @@
     .session-meta span {
       margin-right: 16px;
     }
+    .session-path {
+      font-size: 12px;
+      color: #58a6ff;
+      font-family: monospace;
+      margin-bottom: 8px;
+      word-break: break-all;
+    }
     .session-terminals {
       font-size: 12px;
       color: #888;
@@ -332,6 +339,20 @@
       loadSessions();
     }
 
+    function timeAgo(dateString) {
+      const date = new Date(dateString);
+      const now = new Date();
+      const seconds = Math.floor((now - date) / 1000);
+
+      if (seconds < 60) return 'just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+      const days = Math.floor(hours / 24);
+      return `${days} day${days !== 1 ? 's' : ''} ago`;
+    }
+
     function renderSessions(sessions) {
       const container = document.getElementById('sessions-list');
 
@@ -351,6 +372,9 @@
         const terminals = session.terminals || [];
         const terminalCount = terminals.length;
         const terminalNames = terminals.map(t => t.name).join(', ') || 'none';
+        const handshake = session.controlHandshake || {};
+        const hostname = handshake.hostname || 'unknown';
+        const workingDir = handshake.workingDir || '';
 
         return `
           <div class="session-card">
@@ -359,8 +383,10 @@
               <span class="session-status ${statusClass}">${session.state}</span>
             </div>
             <div class="session-meta">
-              <span>Created: ${new Date(session.createdAt).toLocaleString()}</span>
+              <span>${hostname}</span>
+              <span>created ${timeAgo(session.createdAt)}</span>
             </div>
+            ${workingDir ? `<div class="session-path">${workingDir}</div>` : ''}
             <div class="session-terminals">
               Terminals (${terminalCount}): ${terminalNames}
             </div>
