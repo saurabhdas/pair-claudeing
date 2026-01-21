@@ -16,6 +16,10 @@ pub struct Args {
     #[arg(short = 'n', long)]
     pub session: Option<String>,
 
+    /// Use secure WebSocket (wss://) and HTTPS
+    #[arg(long)]
+    pub secure: bool,
+
     /// Shell to spawn (default: $SHELL or /bin/sh)
     #[arg(short, long)]
     pub shell: Option<String>,
@@ -66,12 +70,19 @@ impl Config {
             petname::petname(3, "-").unwrap_or_else(|| "session".to_string())
         });
 
+        // Determine scheme based on --secure flag
+        let (ws_scheme, http_scheme) = if args.secure {
+            ("wss", "https")
+        } else {
+            ("ws", "http")
+        };
+
         // Construct WebSocket URL from relay address
-        let relay_url = Url::parse(&format!("ws://{}/ws/control/{}", args.relay, session_name))
+        let relay_url = Url::parse(&format!("{}://{}/ws/control/{}", ws_scheme, args.relay, session_name))
             .map_err(|e| anyhow!("invalid relay address '{}': {}", args.relay, e))?;
 
         // Construct browser URL for display (new format requires two sessions)
-        let browser_url = format!("http://{}/terminal/{}/<other-session>", args.relay, session_name);
+        let browser_url = format!("{}://{}/terminal/{}/<other-session>", http_scheme, args.relay, session_name);
 
         // Determine shell to use
         let shell = args.shell.unwrap_or_else(|| {
@@ -110,6 +121,7 @@ mod tests {
         let args = Args {
             relay: "localhost:8080".to_string(),
             session: None,
+            secure: false,
             shell: None,
             command: None,
             verbose: false,
@@ -126,6 +138,7 @@ mod tests {
         let args = Args {
             relay: "localhost:8080".to_string(),
             session: Some("my-custom-session".to_string()),
+            secure: false,
             shell: None,
             command: None,
             verbose: false,
@@ -142,6 +155,7 @@ mod tests {
         let args = Args {
             relay: "relay.example.com:9000".to_string(),
             session: Some("test-session".to_string()),
+            secure: false,
             shell: None,
             command: None,
             verbose: false,
@@ -159,10 +173,27 @@ mod tests {
     }
 
     #[test]
+    fn test_secure_flag() {
+        let args = Args {
+            relay: "relay.example.com".to_string(),
+            session: Some("test-session".to_string()),
+            secure: true,
+            shell: None,
+            command: None,
+            verbose: false,
+            no_reconnect: false,
+        };
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.relay_url.scheme(), "wss");
+        assert!(config.browser_url.starts_with("https://"));
+    }
+
+    #[test]
     fn test_custom_shell() {
         let args = Args {
             relay: "localhost:8080".to_string(),
             session: None,
+            secure: false,
             shell: Some("/bin/zsh".to_string()),
             command: None,
             verbose: false,
