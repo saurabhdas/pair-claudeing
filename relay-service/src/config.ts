@@ -2,6 +2,8 @@
  * Configuration management for the relay service.
  */
 
+import { randomBytes } from 'crypto';
+
 export interface Config {
   port: number;
   host: string;
@@ -39,7 +41,7 @@ export function loadConfig(): Config {
     },
     cookieSecret: process.env.COOKIE_SECRET || 'dev-secret-change-in-production',
     baseUrl,
-    jwtSecret: process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production',
+    jwtSecret: process.env.JWT_SECRET || randomBytes(32).toString('hex'),
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
   };
 }
