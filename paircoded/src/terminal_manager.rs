@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, oneshot};
@@ -46,6 +47,8 @@ pub struct TerminalManager {
     shell: String,
     /// Shell arguments
     shell_args: Vec<String>,
+    /// Working directory for spawned terminals
+    working_dir: PathBuf,
 }
 
 impl TerminalManager {
@@ -54,6 +57,7 @@ impl TerminalManager {
         base_url: Url,
         shell: String,
         shell_args: Vec<String>,
+        working_dir: PathBuf,
     ) -> (Self, mpsc::Receiver<TerminalEvent>) {
         let (event_tx, event_rx) = mpsc::channel(64);
 
@@ -64,6 +68,7 @@ impl TerminalManager {
                 base_url,
                 shell,
                 shell_args,
+                working_dir,
             },
             event_rx,
         )
@@ -93,7 +98,7 @@ impl TerminalManager {
 
         // Spawn the PTY
         let shell_args: Vec<&str> = self.shell_args.iter().map(|s| s.as_str()).collect();
-        let pty_handle = PtyHandle::spawn(&self.shell, &shell_args)
+        let pty_handle = PtyHandle::spawn(&self.shell, &shell_args, &self.working_dir)
             .context("failed to spawn PTY")?;
 
         // Resize to requested dimensions

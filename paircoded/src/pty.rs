@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info};
@@ -24,8 +25,8 @@ pub struct PtyHandle {
 }
 
 impl PtyHandle {
-    /// Spawn a new PTY with the given shell command
-    pub fn spawn(shell: &str, args: &[&str]) -> Result<Self> {
+    /// Spawn a new PTY with the given shell command and working directory
+    pub fn spawn(shell: &str, args: &[&str], working_dir: &Path) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -42,10 +43,8 @@ impl PtyHandle {
             cmd.arg(*arg);
         }
 
-        // Set working directory to current directory
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
-        }
+        // Set working directory
+        cmd.cwd(working_dir);
 
         // Inherit environment
         for (key, value) in std::env::vars() {

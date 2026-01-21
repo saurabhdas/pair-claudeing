@@ -228,6 +228,10 @@ pub enum ControlResponse {
     /// Initial handshake on control connection
     ControlHandshake {
         version: String,
+        hostname: String,
+        username: String,
+        #[serde(rename = "workingDir")]
+        working_dir: String,
     },
     /// Response to start_terminal request
     TerminalStarted {
@@ -346,11 +350,17 @@ mod tests {
     fn test_encode_control_handshake() {
         let msg = ControlResponse::ControlHandshake {
             version: "1.0".to_string(),
+            hostname: "myhost".to_string(),
+            username: "testuser".to_string(),
+            working_dir: "/home/testuser".to_string(),
         };
         let encoded = msg.encode().unwrap();
         let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(json["type"], "control_handshake");
         assert_eq!(json["version"], "1.0");
+        assert_eq!(json["hostname"], "myhost");
+        assert_eq!(json["username"], "testuser");
+        assert_eq!(json["workingDir"], "/home/testuser");
     }
 
     #[test]

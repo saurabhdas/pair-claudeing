@@ -67,7 +67,7 @@
     cursorBlink: true,
     cursorStyle: 'block',
     fontSize: 14,
-    fontFamily: 'MesloLGS NF',
+    fontFamily: 'MesloLGS NF, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace',
     fontWeight: 'normal',
     fontWeightBold: 'bold',
     lineHeight: 1.0,
@@ -368,6 +368,8 @@
     resizeTimeout = setTimeout(function() {
       fitLeft.fit();
       fitRight.fit();
+      termLeft.scrollToBottom();
+      termRight.scrollToBottom();
 
       if (leftSetupComplete) {
         sendResize(wsLeft, fitLeft);

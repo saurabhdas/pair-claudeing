@@ -11,6 +11,7 @@
 //! 3. Paircoded spawns a PTY and opens a data websocket for that terminal
 //! 4. Multiple terminals can be active simultaneously, each with their own PTY
 
+mod auth;
 mod bridge;
 mod config;
 mod control;
@@ -24,15 +25,16 @@ use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use crate::auth::get_auth;
 use crate::config::{Args, Config};
-use crate::control::{ControlConnection, ControlEvent, ReconnectManager};
+use crate::control::{ControlConnection, ControlEvent, HandshakeInfo, ReconnectManager};
 use crate::terminal_manager::{TerminalEvent, TerminalManager};
 
 fn setup_logging(verbose: bool) {
     let filter = if verbose {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
     tracing_subscriber::registry()
@@ -44,19 +46,30 @@ fn setup_logging(verbose: bool) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let config = Config::from_args(args)?;
+    let force_login = args.login;
+    let verbose = args.verbose;
 
-    setup_logging(config.verbose);
+    // Set up logging early (but quiet by default)
+    setup_logging(verbose);
+
+    // Authenticate with GitHub
+    let auth = get_auth(force_login).await?;
+
+    // Create config with username from auth
+    let config = Config::from_args(args, &auth.user.login)?;
 
     // Print user-friendly session info (always visible regardless of log level)
     println!();
+    println!("  User:    {} ({})", auth.user.login, config.hostname);
     println!("  Session: {}", config.session_name);
+    println!("  Path:    {}", config.working_dir.display());
     println!("  Pair at: {}", config.browser_url);
     println!();
 
     info!(
         relay_url = %config.relay_url,
         shell = %config.shell,
+        working_dir = %config.working_dir.display(),
         "starting paircoded"
     );
 
@@ -64,11 +77,12 @@ async fn main() -> Result<()> {
     let (shell, shell_args) = config.spawn_command();
     let shell_args: Vec<String> = shell_args.iter().map(|s| s.to_string()).collect();
 
-    // Create terminal manager
+    // Create terminal manager with working directory
     let (terminal_manager, mut terminal_event_rx) = TerminalManager::new(
         config.relay_url.clone(),
         shell.to_string(),
         shell_args,
+        config.working_dir.clone(),
     );
 
     // Handle graceful shutdown
@@ -81,9 +95,16 @@ async fn main() -> Result<()> {
     // Main loop with reconnection support
     'main: loop {
         // Connect to control endpoint
+        let handshake_info = HandshakeInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            hostname: config.hostname.clone(),
+            username: config.username.clone(),
+            working_dir: config.working_dir.display().to_string(),
+        };
+
         let connect_result = ControlConnection::connect(
             &config.relay_url,
-            env!("CARGO_PKG_VERSION").to_string(),
+            handshake_info,
         )
         .await;
 

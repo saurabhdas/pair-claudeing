@@ -22,14 +22,28 @@
       height: 100%;
     }
     .panel {
-      flex: 1;
       height: 100%;
       display: flex;
       flex-direction: column;
-      border-right: 1px solid #444;
+      min-width: 100px;
+      overflow: hidden;
     }
-    .panel:last-child {
-      border-right: none;
+    #panel-left {
+      flex: 1;
+    }
+    #panel-right {
+      flex: 1;
+    }
+    .divider {
+      width: 6px;
+      background: #2d2d2d;
+      cursor: col-resize;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .divider:hover,
+    .divider.dragging {
+      background: #444;
     }
     .panel-header {
       padding: 4px 8px;
@@ -91,11 +105,12 @@
   <div id="user-info"></div>
   <div id="status" class="connecting">Connecting...</div>
   <div id="container">
-    <div class="panel">
+    <div id="panel-left" class="panel">
       <div class="panel-header">Terminal (read/write)</div>
       <div id="terminal-left" class="terminal-container"></div>
     </div>
-    <div class="panel">
+    <div id="divider" class="divider"></div>
+    <div id="panel-right" class="panel">
       <div class="panel-header">Mirror (read-only)</div>
       <div id="terminal-right" class="terminal-container"></div>
     </div>
@@ -126,6 +141,55 @@
         .then(() => window.location.href = '/login')
         .catch(() => {});
     }
+
+    // Resizable panels
+    (function() {
+      const container = document.getElementById('container');
+      const divider = document.getElementById('divider');
+      const panelLeft = document.getElementById('panel-left');
+      const panelRight = document.getElementById('panel-right');
+      let isDragging = false;
+
+      divider.addEventListener('mousedown', function(e) {
+        isDragging = true;
+        divider.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', function(e) {
+        if (!isDragging) return;
+
+        const containerRect = container.getBoundingClientRect();
+        const containerWidth = containerRect.width;
+        const dividerWidth = divider.offsetWidth;
+        const minWidth = 100;
+
+        let leftWidth = e.clientX - containerRect.left;
+        leftWidth = Math.max(minWidth, Math.min(leftWidth, containerWidth - minWidth - dividerWidth));
+
+        const leftPercent = (leftWidth / containerWidth) * 100;
+        const rightPercent = ((containerWidth - leftWidth - dividerWidth) / containerWidth) * 100;
+
+        panelLeft.style.flex = 'none';
+        panelRight.style.flex = 'none';
+        panelLeft.style.width = leftPercent + '%';
+        panelRight.style.width = rightPercent + '%';
+
+        // Trigger resize event for terminals to refit
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      document.addEventListener('mouseup', function() {
+        if (isDragging) {
+          isDragging = false;
+          divider.classList.remove('dragging');
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        }
+      });
+    })();
   </script>
   <script src="/terminal.js"></script>
 </body>

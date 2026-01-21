@@ -55,11 +55,19 @@ pub struct ControlConnection {
     command_tx: mpsc::Sender<ControlCommand>,
 }
 
+/// Handshake info to send to relay on control connection
+pub struct HandshakeInfo {
+    pub version: String,
+    pub hostname: String,
+    pub username: String,
+    pub working_dir: String,
+}
+
 impl ControlConnection {
     /// Connect to the relay's control endpoint and start the control loop
     pub async fn connect(
         url: &Url,
-        version: String,
+        handshake_info: HandshakeInfo,
     ) -> Result<(Self, mpsc::Receiver<ControlEvent>)> {
         info!(url = %url, "connecting to control endpoint");
 
@@ -77,7 +85,12 @@ impl ControlConnection {
         let (command_tx, mut command_rx) = mpsc::channel::<ControlCommand>(64);
 
         // Send initial handshake
-        let handshake = ControlResponse::ControlHandshake { version };
+        let handshake = ControlResponse::ControlHandshake {
+            version: handshake_info.version,
+            hostname: handshake_info.hostname,
+            username: handshake_info.username,
+            working_dir: handshake_info.working_dir,
+        };
         let handshake_json = handshake.encode()?;
         ws_sink
             .send(Message::Text(handshake_json))
