@@ -25,7 +25,7 @@ use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use crate::auth::get_auth;
+use crate::auth::{get_auth, get_relay_token};
 use crate::config::{Args, Config};
 use crate::control::{ControlConnection, ControlEvent, HandshakeInfo, ReconnectManager};
 use crate::terminal_manager::{TerminalEvent, TerminalManager};
@@ -57,6 +57,9 @@ async fn main() -> Result<()> {
 
     // Create config with username from auth
     let config = Config::from_args(args, &auth.user.login)?;
+
+    // Get relay JWT token
+    let relay_token = get_relay_token(&config.relay_url, &auth.access_token).await?;
 
     // Print user-friendly session info (always visible regardless of log level)
     println!();
@@ -93,6 +96,8 @@ async fn main() -> Result<()> {
     let mut reconnect_mgr = ReconnectManager::new();
 
     // Main loop with reconnection support
+    let current_relay_token = relay_token;
+
     'main: loop {
         // Connect to control endpoint
         let handshake_info = HandshakeInfo {
@@ -100,6 +105,7 @@ async fn main() -> Result<()> {
             hostname: config.hostname.clone(),
             username: config.username.clone(),
             working_dir: config.working_dir.display().to_string(),
+            relay_token: current_relay_token.clone(),
         };
 
         let connect_result = ControlConnection::connect(

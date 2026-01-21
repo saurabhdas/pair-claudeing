@@ -16,11 +16,15 @@ import {
 } from '../protocol/index.js';
 import { SessionManager, SessionState } from '../session/index.js';
 import { createChildLogger } from '../utils/logger.js';
+import { extractBearerToken, verifyToken } from '../server/jwt.js';
+import type { Config } from '../config.js';
 
 const log = createChildLogger('control-handler');
 
 export interface ControlHandlerOptions {
   sessionManager: SessionManager;
+  config: Config;
+  authHeader?: string;
 }
 
 export function handleControlConnection(
@@ -28,12 +32,36 @@ export function handleControlConnection(
   sessionId: string,
   options: ControlHandlerOptions
 ): void {
-  const { sessionManager } = options;
+  const { sessionManager, config, authHeader } = options;
+
+  // Validate JWT token
+  const token = extractBearerToken(authHeader);
+  if (!token) {
+    log.warn({ sessionId }, 'control connection rejected: missing authorization');
+    ws.close(4401, 'Missing authorization');
+    return;
+  }
+
+  const jwtPayload = verifyToken(token, config);
+  if (!jwtPayload) {
+    log.warn({ sessionId }, 'control connection rejected: invalid token');
+    ws.close(4401, 'Invalid token');
+    return;
+  }
+
+  log.info({ sessionId, userId: jwtPayload.sub, username: jwtPayload.username }, 'authenticated control connection');
 
   // Get or create session
   let session = sessionManager.getSession(sessionId);
   if (!session) {
     session = sessionManager.createSession(sessionId);
+  }
+
+  // Check if session already has an owner and if this user is the owner
+  if (session.owner && !session.isOwner(jwtPayload.sub)) {
+    log.warn({ sessionId, attemptedBy: jwtPayload.username, owner: session.owner.username }, 'control connection rejected: not the owner');
+    ws.close(4403, 'Not the session owner');
+    return;
   }
 
   // Check if session already has a control connection
@@ -43,9 +71,14 @@ export function handleControlConnection(
     return;
   }
 
+  // Set ownership if not already set
+  if (!session.owner) {
+    session.setOwner({ userId: jwtPayload.sub, username: jwtPayload.username });
+  }
+
   // Attach control connection
   session.setControlConnection(ws);
-  log.info({ sessionId }, 'control connection established');
+  log.info({ sessionId, owner: jwtPayload.username }, 'control connection established');
 
   // Handle messages from paircoded
   ws.on('message', (data: RawData) => {

@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomBytes } from 'crypto';
 import { createChildLogger } from '../utils/logger.js';
 import type { Config } from '../config.js';
+import { createToken } from './jwt.js';
 
 const log = createChildLogger('auth');
 
@@ -213,6 +214,61 @@ export async function registerAuthRoutes(
       authenticated: !!user,
       user: user || null,
     };
+  });
+
+  // Exchange GitHub token for relay JWT (for CLI authentication)
+  fastify.post('/api/auth/token', async (request, reply) => {
+    const body = request.body as { github_token?: string };
+
+    if (!body.github_token) {
+      return reply.status(400).send({
+        error: 'Missing github_token',
+        code: 'MISSING_TOKEN',
+      });
+    }
+
+    try {
+      // Validate the GitHub token by fetching user info
+      const userResponse = await fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${body.github_token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'paircoded-relay',
+        },
+      });
+
+      if (!userResponse.ok) {
+        log.warn({ status: userResponse.status }, 'invalid GitHub token');
+        return reply.status(401).send({
+          error: 'Invalid GitHub token',
+          code: 'INVALID_GITHUB_TOKEN',
+        });
+      }
+
+      const user = (await userResponse.json()) as GitHubUser;
+
+      // Create relay JWT
+      const { token, expiresIn } = createToken(user.id, user.login, config);
+
+      log.info({ userId: user.id, login: user.login }, 'issued relay JWT for CLI');
+
+      return {
+        token,
+        expiresIn,
+        user: {
+          id: user.id,
+          login: user.login,
+          name: user.name,
+          avatar_url: user.avatar_url,
+        },
+      };
+    } catch (error) {
+      log.error({ error }, 'failed to validate GitHub token');
+      return reply.status(500).send({
+        error: 'Failed to validate token',
+        code: 'VALIDATION_FAILED',
+      });
+    }
   });
 }
 

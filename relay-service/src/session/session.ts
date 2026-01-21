@@ -4,7 +4,7 @@
 
 import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
-import { SessionState, type SessionData, type SessionInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
+import { SessionState, type SessionData, type SessionInfo, type SessionOwner, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
 
 // HandshakeMessage is used in setTerminalHandshake method
 import { createChildLogger } from '../utils/logger.js';
@@ -15,6 +15,9 @@ export class Session implements SessionData {
   public readonly id: string;
   public state: SessionState;
   public readonly createdAt: Date;
+
+  // Session owner (from JWT)
+  public owner: SessionOwner | null = null;
 
   // Control connection from paircoded
   public controlWs: WebSocket | null = null;
@@ -39,6 +42,21 @@ export class Session implements SessionData {
   // ============================================================================
   // Control Connection Methods
   // ============================================================================
+
+  /**
+   * Set the session owner (from JWT).
+   */
+  setOwner(owner: SessionOwner): void {
+    this.owner = owner;
+    log.info({ sessionId: this.id, owner }, 'session owner set');
+  }
+
+  /**
+   * Check if a user is the owner of this session.
+   */
+  isOwner(userId: string): boolean {
+    return this.owner !== null && this.owner.userId === userId;
+  }
 
   /**
    * Set the control connection from paircoded.
@@ -335,6 +353,7 @@ export class Session implements SessionData {
       id: this.id,
       state: this.state,
       createdAt: this.createdAt.toISOString(),
+      owner: this.owner,
       controlHandshake: this.controlHandshake,
       cols: this.cols,
       rows: this.rows,

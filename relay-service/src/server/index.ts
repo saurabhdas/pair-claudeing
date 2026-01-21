@@ -89,8 +89,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     { websocket: true },
     (socket, request) => {
       const { sessionId } = request.params;
-      log.info({ sessionId, remoteAddress: request.ip }, 'paircoded control WebSocket connection');
-      handleControlConnection(socket, sessionId, { sessionManager });
+      const authHeader = request.headers.authorization;
+      log.info({ sessionId, remoteAddress: request.ip, hasAuth: !!authHeader }, 'paircoded control WebSocket connection');
+      handleControlConnection(socket, sessionId, { sessionManager, config, authHeader });
     }
   );
 

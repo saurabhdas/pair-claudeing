@@ -16,6 +16,8 @@ export interface Config {
   };
   cookieSecret: string;
   baseUrl: string;
+  jwtSecret: string;
+  jwtExpiresIn: string;
 }
 
 export function loadConfig(): Config {
@@ -37,5 +39,7 @@ export function loadConfig(): Config {
     },
     cookieSecret: process.env.COOKIE_SECRET || 'dev-secret-change-in-production',
     baseUrl,
+    jwtSecret: process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production',
+    jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
   };
 }

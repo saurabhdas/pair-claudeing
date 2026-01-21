@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::{protocol::Message, http::Request}};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -61,6 +61,7 @@ pub struct HandshakeInfo {
     pub hostname: String,
     pub username: String,
     pub working_dir: String,
+    pub relay_token: String,
 }
 
 impl ControlConnection {
@@ -71,7 +72,19 @@ impl ControlConnection {
     ) -> Result<(Self, mpsc::Receiver<ControlEvent>)> {
         info!(url = %url, "connecting to control endpoint");
 
-        let (ws_stream, response) = connect_async(url.as_str())
+        // Build request with Authorization header
+        let request = Request::builder()
+            .uri(url.as_str())
+            .header("Authorization", format!("Bearer {}", handshake_info.relay_token))
+            .header("Host", url.host_str().unwrap_or("localhost"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .body(())
+            .context("failed to build WebSocket request")?;
+
+        let (ws_stream, response) = connect_async_with_config(request, None, false)
             .await
             .context("failed to connect to control endpoint")?;
 

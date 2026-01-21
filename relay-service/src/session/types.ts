@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
 
 // HandshakeMessage is used by Terminal interface
+// SessionOwner is used for tracking who owns a session
 
 export enum SessionState {
   PENDING = 'PENDING',     // Created, waiting for paircoded control connection
@@ -50,10 +51,21 @@ export interface PendingTerminalRequest {
   createdAt: number;
 }
 
+/**
+ * Session owner information from JWT.
+ */
+export interface SessionOwner {
+  userId: string;     // GitHub user ID
+  username: string;   // GitHub username
+}
+
 export interface SessionData {
   id: string;
   state: SessionState;
   createdAt: Date;
+
+  // Session owner (from JWT when control connection established)
+  owner: SessionOwner | null;
 
   // Control connection from paircoded
   controlWs: WebSocket | null;
@@ -84,6 +96,7 @@ export interface SessionInfo {
   id: string;
   state: SessionState;
   createdAt: string;
+  owner: SessionOwner | null;
   controlHandshake: { version: string } | null;
   cols: number;
   rows: number;

@@ -49,6 +49,21 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
+/// Relay token response
+#[derive(Debug, Deserialize)]
+struct RelayTokenResponse {
+    token: String,
+    #[serde(rename = "expiresIn")]
+    expires_in: String,
+}
+
+/// Relay token error response
+#[derive(Debug, Deserialize)]
+struct RelayErrorResponse {
+    error: String,
+    code: String,
+}
+
 /// Get the config directory for paircoded
 fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
@@ -252,4 +267,46 @@ pub async fn get_auth(force_login: bool) -> Result<AuthData> {
 
     // No valid auth, need to login
     device_flow_login().await
+}
+
+/// Get a relay JWT token by exchanging the GitHub token
+pub async fn get_relay_token(relay_base_url: &url::Url, github_token: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+
+    // Build the token endpoint URL
+    let mut token_url = relay_base_url.clone();
+
+    // Convert ws/wss to http/https
+    let scheme = match relay_base_url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        s => s,
+    };
+    token_url.set_scheme(scheme).map_err(|_| anyhow!("failed to set URL scheme"))?;
+    token_url.set_path("/api/auth/token");
+
+    info!(url = %token_url, "requesting relay token");
+
+    let resp = client
+        .post(token_url.as_str())
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "paircoded")
+        .json(&serde_json::json!({
+            "github_token": github_token
+        }))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let token_resp: RelayTokenResponse = resp.json().await?;
+        info!(expires_in = %token_resp.expires_in, "obtained relay token");
+        Ok(token_resp.token)
+    } else {
+        let error_resp: RelayErrorResponse = resp.json().await
+            .unwrap_or_else(|_| RelayErrorResponse {
+                error: "Unknown error".to_string(),
+                code: "UNKNOWN".to_string(),
+            });
+        Err(anyhow!("failed to get relay token: {} ({})", error_resp.error, error_resp.code))
+    }
 }
