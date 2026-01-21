@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
+      background: #1e1e1e;
+      overflow: hidden;
+    }
+    #container {
+      display: flex;
+      width: 100%;
+      height: 100%;
+    }
+    .panel {
+      flex: 1;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #444;
+    }
+    .panel:last-child {
+      border-right: none;
+    }
+    .panel-header {
+      padding: 4px 8px;
+      background: #2d2d2d;
+      color: #888;
+      font-family: monospace;
+      font-size: 11px;
+      border-bottom: 1px solid #444;
+    }
+    .terminal-container {
+      flex: 1;
+      padding: 4px;
+      overflow: hidden;
+    }
+    #status {
+      position: fixed;
+      top: 8px;
+      right: 8px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      z-index: 100;
+    }
+    #status.connecting { background: #f59e0b; color: #000; }
+    #status.connected { background: #10b981; color: #fff; }
+    #status.disconnected { background: #ef4444; color: #fff; }
+    #status.error { background: #ef4444; color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="status" class="connecting">Connecting...</div>
+  <div id="container">
+    <div class="panel">
+      <div class="panel-header">Terminal (read/write)</div>
+      <div id="terminal-left" class="terminal-container"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">Mirror (read-only)</div>
+      <div id="terminal-right" class="terminal-container"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script src="/terminal.js"></script>
+</body>
+</html>

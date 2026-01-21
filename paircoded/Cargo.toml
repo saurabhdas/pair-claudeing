@@ -1,0 +1,45 @@
+[package]
+name = "paircoded"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool that hosts a terminal over the internet by connecting to a relay service"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# PTY management
+portable-pty = "0.8"
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# URL parsing
+url = "2"
+
+# Async utilities
+futures = "0.3"
+futures-util = "0.3"
+
+[[bin]]
+name = "paircoded"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-server"
+path = "src/test_server.rs"
