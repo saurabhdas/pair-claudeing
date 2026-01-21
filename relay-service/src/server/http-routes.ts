@@ -2,8 +2,9 @@
  * HTTP REST API routes for the relay service.
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { SessionManager } from '../session/index.js';
+import { getUser } from './auth-routes.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const log = createChildLogger('http-routes');
@@ -12,76 +13,98 @@ export interface HttpRoutesOptions {
   sessionManager: SessionManager;
 }
 
+// Auth check hook for protected routes
+async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
+  const user = getUser(request);
+  if (!user) {
+    return reply.status(401).send({
+      error: 'Not authenticated',
+      code: 'NOT_AUTHENTICATED',
+    });
+  }
+}
+
 export async function registerHttpRoutes(
   fastify: FastifyInstance,
   options: HttpRoutesOptions
 ): Promise<void> {
   const { sessionManager } = options;
 
-  // Health check
+  // Health check (public - for monitoring)
   fastify.get('/api/health', async () => {
     return {
       status: 'ok',
       timestamp: new Date().toISOString(),
-      sessions: sessionManager.getSessionCount(),
     };
   });
 
-  // List all sessions
-  fastify.get('/api/sessions', async () => {
+  // List all sessions (protected)
+  fastify.get('/api/sessions', { preHandler: requireAuth }, async () => {
     const sessions = sessionManager.listSessions();
     return { sessions };
   });
 
-  // Get session info
-  fastify.get<{ Params: { sessionId: string } }>('/api/sessions/:sessionId', async (request, reply) => {
-    const { sessionId } = request.params;
-    const session = sessionManager.getSession(sessionId);
+  // Get session info (protected)
+  fastify.get<{ Params: { sessionId: string } }>(
+    '/api/sessions/:sessionId',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+      const session = sessionManager.getSession(sessionId);
 
-    if (!session) {
-      return reply.status(404).send({
-        error: 'Session not found',
-        code: 'SESSION_NOT_FOUND',
-        sessionId,
-      });
+      if (!session) {
+        return reply.status(404).send({
+          error: 'Session not found',
+          code: 'SESSION_NOT_FOUND',
+          sessionId,
+        });
+      }
+
+      return session.toInfo();
     }
+  );
 
-    return session.toInfo();
-  });
+  // Create new session (protected)
+  fastify.post<{ Body: { sessionId?: string } }>(
+    '/api/sessions',
+    { preHandler: requireAuth },
+    async (request) => {
+      const { sessionId } = request.body || {};
+      const session = sessionManager.createSession(sessionId);
 
-  // Create new session
-  fastify.post<{ Body: { sessionId?: string } }>('/api/sessions', async (request) => {
-    const { sessionId } = request.body || {};
-    const session = sessionManager.createSession(sessionId);
+      log.info({ sessionId: session.id }, 'session created via API');
 
-    log.info({ sessionId: session.id }, 'session created via API');
-
-    return {
-      sessionId: session.id,
-      state: session.state,
-      createdAt: session.createdAt.toISOString(),
-      wsUrl: {
-        paircoded: `/ws/session/${session.id}`,
-        browser: `/ws/terminal/${session.id}`,
-      },
-    };
-  });
-
-  // Delete session
-  fastify.delete<{ Params: { sessionId: string } }>('/api/sessions/:sessionId', async (request, reply) => {
-    const { sessionId } = request.params;
-    const deleted = sessionManager.deleteSession(sessionId);
-
-    if (!deleted) {
-      return reply.status(404).send({
-        error: 'Session not found',
-        code: 'SESSION_NOT_FOUND',
-        sessionId,
-      });
+      return {
+        sessionId: session.id,
+        state: session.state,
+        createdAt: session.createdAt.toISOString(),
+        wsUrl: {
+          paircoded: `/ws/session/${session.id}`,
+          browser: `/ws/terminal/${session.id}`,
+        },
+      };
     }
+  );
 
-    log.info({ sessionId }, 'session deleted via API');
+  // Delete session (protected)
+  fastify.delete<{ Params: { sessionId: string } }>(
+    '/api/sessions/:sessionId',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+      const deleted = sessionManager.deleteSession(sessionId);
 
-    return { success: true, sessionId };
-  });
+      if (!deleted) {
+        return reply.status(404).send({
+          error: 'Session not found',
+          code: 'SESSION_NOT_FOUND',
+          sessionId,
+        });
+      }
+
+      log.info({ sessionId }, 'session deleted via API');
+
+      return { success: true, sessionId };
+    }
+  );
 }

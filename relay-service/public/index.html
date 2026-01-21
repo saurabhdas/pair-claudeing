@@ -58,9 +58,37 @@
     #status.connected { background: #10b981; color: #fff; }
     #status.disconnected { background: #ef4444; color: #fff; }
     #status.error { background: #ef4444; color: #fff; }
+    #user-info {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #2d2d2d;
+      font-family: monospace;
+      font-size: 12px;
+      color: #888;
+      z-index: 100;
+    }
+    #user-info img {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+    }
+    #user-info a {
+      color: #888;
+      text-decoration: none;
+    }
+    #user-info a:hover {
+      color: #d4d4d4;
+    }
   </style>
 </head>
 <body>
+  <div id="user-info"></div>
   <div id="status" class="connecting">Connecting...</div>
   <div id="container">
     <div class="panel">
@@ -77,6 +105,28 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script>
+    // Load user info
+    fetch('/auth/status')
+      .then(res => res.json())
+      .then(data => {
+        const userInfo = document.getElementById('user-info');
+        if (data.authenticated && data.user) {
+          userInfo.innerHTML = `
+            <img src="${data.user.avatar_url}" alt="${data.user.login}">
+            <span>${data.user.login}</span>
+            <a href="#" onclick="logout(); return false;">logout</a>
+          `;
+        }
+      })
+      .catch(() => {});
+
+    function logout() {
+      fetch('/auth/logout', { method: 'POST' })
+        .then(() => window.location.href = '/login')
+        .catch(() => {});
+    }
+  </script>
   <script src="/terminal.js"></script>
 </body>
 </html>
