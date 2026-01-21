@@ -146,4 +146,13 @@ impl Bridge {
 
         Ok(None)
     }
+
+    /// Check if the PTY process is still alive
+    pub async fn is_pty_alive(&self) -> bool {
+        match self.pty.try_wait().await {
+            Ok(Some(_)) => false, // Process has exited
+            Ok(None) => true,     // Process is still running
+            Err(_) => false,      // Error checking - assume dead
+        }
+    }
 }

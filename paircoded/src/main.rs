@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::config::{Args, Config};
-use crate::control::{ControlConnection, ControlEvent};
+use crate::control::{ControlConnection, ControlEvent, ReconnectManager};
 use crate::terminal_manager::{TerminalEvent, TerminalManager};
 
 fn setup_logging(verbose: bool) {
@@ -65,94 +65,152 @@ async fn main() -> Result<()> {
         shell_args,
     );
 
-    // Connect to control endpoint
-    let (control_conn, mut control_event_rx) = ControlConnection::connect(
-        &config.relay_url,
-        env!("CARGO_PKG_VERSION").to_string(),
-    )
-    .await?;
-
-    info!("connected to relay control endpoint, waiting for terminal requests");
-
     // Handle graceful shutdown
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
-    loop {
-        tokio::select! {
-            // Handle control events from relay
-            event = control_event_rx.recv() => {
-                match event {
-                    Some(ControlEvent::StartTerminal { name, cols, rows, request_id }) => {
-                        match terminal_manager.start_terminal(name.clone(), cols, rows).await {
-                            Ok(()) => {
-                                let _ = control_conn.terminal_started(
-                                    name,
-                                    request_id,
-                                    true,
-                                    None,
-                                ).await;
-                            }
-                            Err(e) => {
-                                error!(error = %e, name = %name, "failed to start terminal");
-                                let _ = control_conn.terminal_started(
-                                    name,
-                                    request_id,
-                                    false,
-                                    Some(e.to_string()),
-                                ).await;
-                            }
-                        }
-                    }
+    // Reconnection manager for control connection
+    let mut reconnect_mgr = ReconnectManager::new();
 
-                    Some(ControlEvent::CloseTerminal { name, signal }) => {
-                        if let Err(e) = terminal_manager.close_terminal(&name, signal).await {
-                            warn!(error = %e, name = %name, "failed to close terminal");
-                        }
-                    }
+    // Main loop with reconnection support
+    'main: loop {
+        // Connect to control endpoint
+        let connect_result = ControlConnection::connect(
+            &config.relay_url,
+            env!("CARGO_PKG_VERSION").to_string(),
+        )
+        .await;
 
-                    Some(ControlEvent::Disconnected) => {
-                        warn!("control connection lost");
-                        if config.reconnect {
-                            // TODO: Implement reconnection logic
-                            info!("reconnection not yet implemented, exiting");
-                        }
-                        break;
-                    }
+        let (control_conn, mut control_event_rx) = match connect_result {
+            Ok(result) => {
+                reconnect_mgr.reset();
+                info!("connected to relay control endpoint, waiting for terminal requests");
+                result
+            }
+            Err(e) => {
+                error!(error = %e, "failed to connect to control endpoint");
 
-                    None => {
-                        warn!("control event channel closed");
-                        break;
+                if !config.reconnect {
+                    error!("reconnection disabled, exiting");
+                    break 'main;
+                }
+
+                let delay = reconnect_mgr.next_delay();
+                info!(
+                    delay_ms = delay.as_millis(),
+                    attempt = reconnect_mgr.attempts(),
+                    "waiting before reconnect"
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {
+                        continue 'main;
+                    }
+                    _ = &mut shutdown => {
+                        info!("received shutdown signal during reconnect wait");
+                        break 'main;
                     }
                 }
             }
+        };
 
-            // Handle terminal events
-            event = terminal_event_rx.recv() => {
-                match event {
-                    Some(TerminalEvent::Exited { name, exit_code }) => {
-                        info!(name = %name, exit_code, "terminal exited");
-                        let _ = control_conn.terminal_closed(name.clone(), exit_code).await;
-                        terminal_manager.remove_terminal(&name).await;
-                    }
+        // Event loop for current connection
+        loop {
+            tokio::select! {
+                // Handle control events from relay
+                event = control_event_rx.recv() => {
+                    match event {
+                        Some(ControlEvent::StartTerminal { name, cols, rows, request_id }) => {
+                            match terminal_manager.start_terminal(name.clone(), cols, rows).await {
+                                Ok(()) => {
+                                    let _ = control_conn.terminal_started(
+                                        name,
+                                        request_id,
+                                        true,
+                                        None,
+                                    ).await;
+                                }
+                                Err(e) => {
+                                    error!(error = %e, name = %name, "failed to start terminal");
+                                    let _ = control_conn.terminal_started(
+                                        name,
+                                        request_id,
+                                        false,
+                                        Some(e.to_string()),
+                                    ).await;
+                                }
+                            }
+                        }
 
-                    Some(TerminalEvent::Disconnected { name }) => {
-                        warn!(name = %name, "terminal data connection lost");
-                        let _ = control_conn.terminal_closed(name.clone(), 1).await;
-                        terminal_manager.remove_terminal(&name).await;
-                    }
+                        Some(ControlEvent::CloseTerminal { name, signal }) => {
+                            if let Err(e) = terminal_manager.close_terminal(&name, signal).await {
+                                warn!(error = %e, name = %name, "failed to close terminal");
+                            }
+                        }
 
-                    None => {
-                        // Terminal event channel closed - shouldn't happen
-                        warn!("terminal event channel closed");
+                        Some(ControlEvent::Disconnected) => {
+                            warn!("control connection lost");
+
+                            if !config.reconnect {
+                                info!("reconnection disabled, exiting");
+                                break 'main;
+                            }
+
+                            let delay = reconnect_mgr.next_delay();
+                            info!(
+                                delay_ms = delay.as_millis(),
+                                attempt = reconnect_mgr.attempts(),
+                                "control connection lost, reconnecting"
+                            );
+
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {
+                                    continue 'main; // Try to reconnect
+                                }
+                                _ = &mut shutdown => {
+                                    info!("received shutdown signal during reconnect wait");
+                                    break 'main;
+                                }
+                            }
+                        }
+
+                        None => {
+                            warn!("control event channel closed");
+                            if config.reconnect {
+                                continue 'main;
+                            }
+                            break 'main;
+                        }
                     }
                 }
-            }
 
-            // Handle shutdown signal
-            _ = &mut shutdown => {
-                info!("received shutdown signal");
-                break;
+                // Handle terminal events
+                event = terminal_event_rx.recv() => {
+                    match event {
+                        Some(TerminalEvent::Exited { name, exit_code }) => {
+                            info!(name = %name, exit_code, "terminal exited");
+                            let _ = control_conn.terminal_closed(name.clone(), exit_code).await;
+                            terminal_manager.remove_terminal(&name).await;
+                        }
+
+                        Some(TerminalEvent::Disconnected { name }) => {
+                            warn!(name = %name, "terminal disconnected (will auto-reconnect)");
+                            // Note: Terminal data connection handles its own reconnection
+                            // We don't need to do anything here - the terminal task will reconnect
+                        }
+
+                        None => {
+                            // Terminal event channel closed - shouldn't happen
+                            warn!("terminal event channel closed");
+                        }
+                    }
+                }
+
+                // Handle shutdown signal
+                _ = &mut shutdown => {
+                    info!("received shutdown signal");
+                    break 'main;
+                }
             }
         }
     }

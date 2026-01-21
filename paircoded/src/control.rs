@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
@@ -231,5 +232,48 @@ impl ControlConnection {
             .send(ControlCommand::TerminalClosed { name, exit_code })
             .await
             .map_err(|_| anyhow::anyhow!("control connection closed"))
+    }
+}
+
+/// Reconnection manager with exponential backoff
+pub struct ReconnectManager {
+    base_delay: Duration,
+    max_delay: Duration,
+    current_attempt: u32,
+}
+
+impl ReconnectManager {
+    pub fn new() -> Self {
+        ReconnectManager {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
+            current_attempt: 0,
+        }
+    }
+
+    /// Get the next reconnection delay
+    pub fn next_delay(&mut self) -> Duration {
+        let delay = std::cmp::min(
+            self.base_delay * 2u32.pow(self.current_attempt),
+            self.max_delay,
+        );
+        self.current_attempt += 1;
+        delay
+    }
+
+    /// Reset the attempt counter (call after successful connection)
+    pub fn reset(&mut self) {
+        self.current_attempt = 0;
+    }
+
+    /// Get the current attempt number
+    pub fn attempts(&self) -> u32 {
+        self.current_attempt
+    }
+}
+
+impl Default for ReconnectManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

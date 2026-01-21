@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, oneshot};
 use tracing::{error, info, warn};
 use url::Url;
@@ -20,13 +21,14 @@ use crate::relay::RelayConnection;
 pub enum TerminalEvent {
     /// Terminal PTY process exited
     Exited { name: String, exit_code: i32 },
-    /// Terminal data connection lost
+    /// Terminal data connection lost (PTY may still be alive)
     Disconnected { name: String },
 }
 
 /// Active terminal instance
 struct Terminal {
     /// Name of the terminal
+    #[allow(dead_code)]
     name: String,
     /// Handle to send shutdown signal
     shutdown_tx: oneshot::Sender<()>,
@@ -177,18 +179,6 @@ impl TerminalManager {
         terminals.remove(name);
     }
 
-    /// Check if a terminal exists
-    pub async fn has_terminal(&self, name: &str) -> bool {
-        let terminals = self.terminals.lock().await;
-        terminals.contains_key(name)
-    }
-
-    /// Get the number of active terminals
-    pub async fn terminal_count(&self) -> usize {
-        let terminals = self.terminals.lock().await;
-        terminals.len()
-    }
-
     /// Build the data websocket URL for a terminal
     fn build_data_url(&self, session_id: &str, terminal_name: &str) -> Result<Url> {
         // Start from base URL and replace path
@@ -198,7 +188,7 @@ impl TerminalManager {
     }
 }
 
-/// Run a terminal's bridge loop
+/// Run a terminal's bridge loop with reconnection support
 async fn run_terminal_task(
     name: String,
     pty: AsyncPty,
@@ -207,33 +197,67 @@ async fn run_terminal_task(
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<i32> {
     let mut bridge = Bridge::new(pty).await?;
+    let mut reconnect_delay = Duration::from_secs(1);
+    let max_reconnect_delay = Duration::from_secs(30);
 
-    // Connect to data websocket
-    let conn = RelayConnection::connect(&data_url, handshake).await?;
-    let (tx, rx) = conn.into_receiver();
+    loop {
+        // Connect to data websocket
+        info!(terminal = %name, url = %data_url, "connecting to data websocket");
 
-    // Run bridge with shutdown signal
-    tokio::select! {
-        result = bridge.run(tx, rx) => {
-            match result {
-                Ok(Some(exit_code)) => {
-                    info!(terminal = %name, exit_code, "terminal PTY exited");
-                    Ok(exit_code)
+        match RelayConnection::connect(&data_url, handshake.clone()).await {
+            Ok(conn) => {
+                reconnect_delay = Duration::from_secs(1); // Reset on successful connection
+                let (tx, rx) = conn.into_receiver();
+
+                // Run bridge with shutdown signal
+                tokio::select! {
+                    result = bridge.run(tx, rx) => {
+                        match result {
+                            Ok(Some(exit_code)) => {
+                                info!(terminal = %name, exit_code, "terminal PTY exited");
+                                return Ok(exit_code);
+                            }
+                            Ok(None) => {
+                                // Data connection lost, but PTY may still be alive
+                                warn!(terminal = %name, "data connection lost, attempting reconnect");
+                            }
+                            Err(e) => {
+                                error!(terminal = %name, error = %e, "terminal bridge error");
+                                // Try to reconnect
+                                warn!(terminal = %name, "will attempt reconnect after error");
+                            }
+                        }
+                    }
+
+                    _ = &mut shutdown_rx => {
+                        info!(terminal = %name, "terminal shutdown requested");
+                        return Ok(0);
+                    }
                 }
-                Ok(None) => {
-                    warn!(terminal = %name, "terminal data connection lost");
-                    Ok(1)
-                }
-                Err(e) => {
-                    error!(terminal = %name, error = %e, "terminal bridge error");
-                    Err(e)
-                }
+            }
+            Err(e) => {
+                error!(terminal = %name, error = %e, "failed to connect to data websocket");
             }
         }
 
-        _ = &mut shutdown_rx => {
-            info!(terminal = %name, "terminal shutdown requested");
-            Ok(0)
+        // Check if PTY is still alive before reconnecting
+        if !bridge.is_pty_alive().await {
+            info!(terminal = %name, "PTY process has exited, not reconnecting");
+            return Ok(1);
+        }
+
+        // Wait before reconnecting
+        info!(terminal = %name, delay_ms = reconnect_delay.as_millis(), "waiting before reconnect");
+
+        tokio::select! {
+            _ = tokio::time::sleep(reconnect_delay) => {
+                // Increase delay for next attempt (exponential backoff)
+                reconnect_delay = std::cmp::min(reconnect_delay * 2, max_reconnect_delay);
+            }
+            _ = &mut shutdown_rx => {
+                info!(terminal = %name, "terminal shutdown requested during reconnect wait");
+                return Ok(0);
+            }
         }
     }
 }
