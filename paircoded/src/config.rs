@@ -51,8 +51,8 @@ pub struct Config {
     /// Session name (e.g., "saurabhdas-12345678")
     pub session_name: String,
 
-    /// Browser URL to display to user
-    pub browser_url: String,
+    /// Dashboard URL to display to user
+    pub dashboard_url: String,
 
     /// Working directory for the terminal
     pub working_dir: PathBuf,
@@ -115,14 +115,14 @@ impl Config {
             ws_scheme, host, port_str, session_name
         ))?;
 
-        // Construct browser URL
+        // Construct dashboard URL
         let http_scheme = match ws_scheme {
             "wss" => "https",
             _ => "http",
         };
-        let browser_url = format!(
-            "{}://{}{}/terminal/{}/<other-session>",
-            http_scheme, host, port_str, session_name
+        let dashboard_url = format!(
+            "{}://{}{}",
+            http_scheme, host, port_str
         );
 
         // Determine working directory
@@ -153,7 +153,7 @@ impl Config {
         Ok(Config {
             relay_url,
             session_name,
-            browser_url,
+            dashboard_url,
             working_dir,
             shell,
             command: args.command,

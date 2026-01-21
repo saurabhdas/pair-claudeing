@@ -63,10 +63,10 @@ async fn main() -> Result<()> {
 
     // Print user-friendly session info (always visible regardless of log level)
     println!();
-    println!("  User:    {} ({})", auth.user.login, config.hostname);
-    println!("  Session: {}", config.session_name);
-    println!("  Path:    {}", config.working_dir.display());
-    println!("  Pair at: {}", config.browser_url);
+    println!("  User:      {} ({})", auth.user.login, config.hostname);
+    println!("  Session:   {}", config.session_name);
+    println!("  Path:      {}", config.working_dir.display());
+    println!("  Dashboard: {}", config.dashboard_url);
     println!();
 
     info!(

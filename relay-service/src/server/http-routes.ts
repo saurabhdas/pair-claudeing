@@ -38,10 +38,22 @@ export async function registerHttpRoutes(
     };
   });
 
-  // List all sessions (protected)
+  // List all sessions (protected - admin only in future)
   fastify.get('/api/sessions', { preHandler: requireAuth }, async () => {
     const sessions = sessionManager.listSessions();
     return { sessions };
+  });
+
+  // List current user's sessions (protected)
+  fastify.get('/api/my-sessions', { preHandler: requireAuth }, async (request) => {
+    const user = getUser(request);
+    if (!user) {
+      return { sessions: [] };
+    }
+
+    const allSessions = sessionManager.listSessions();
+    const mySessions = allSessions.filter(s => s.owner?.userId === user.id.toString());
+    return { sessions: mySessions };
   });
 
   // Get session info (protected)
