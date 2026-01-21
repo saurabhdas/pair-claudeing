@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A CLI tool that hosts a terminal over the internet by connecting to a relay service"
 license = "MIT"
+default-run = "paircoded"
 
 [dependencies]
 # Async runtime
