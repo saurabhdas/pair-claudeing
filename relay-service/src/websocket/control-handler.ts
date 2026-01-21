@@ -125,7 +125,8 @@ function handleTerminalStarted(
     session.createTerminal(message.name, request.cols, request.rows);
 
     // Add the browser as an interactive client
-    session.addInteractiveClient(message.name, request.browserWs);
+    // No snapshot needed for first client since terminal is fresh
+    session.addInteractiveClient(message.name, request.browserWs, null);
 
     // Send success response to browser
     const response = createSetupResponse(true, message.name, request.cols, request.rows);
@@ -157,12 +158,12 @@ function handleTerminalClosed(
   if (terminal) {
     // Notify all clients
     const exitMessage = JSON.stringify({ type: 'exit', code: message.exitCode });
-    for (const ws of terminal.interactiveClients) {
+    for (const ws of terminal.interactiveClients.keys()) {
       if (ws.readyState === 1) {
         ws.send(exitMessage);
       }
     }
-    for (const ws of terminal.mirrorClients) {
+    for (const ws of terminal.mirrorClients.keys()) {
       if (ws.readyState === 1) {
         ws.send(exitMessage);
       }
@@ -191,12 +192,12 @@ function handleControlDisconnect(
       // Notify all terminal clients
       const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'paircoded_timeout' });
       for (const terminal of session.terminals.values()) {
-        for (const ws of terminal.interactiveClients) {
+        for (const ws of terminal.interactiveClients.keys()) {
           if (ws.readyState === 1) {
             ws.send(disconnectMessage);
           }
         }
-        for (const ws of terminal.mirrorClients) {
+        for (const ws of terminal.mirrorClients.keys()) {
           if (ws.readyState === 1) {
             ws.send(disconnectMessage);
           }

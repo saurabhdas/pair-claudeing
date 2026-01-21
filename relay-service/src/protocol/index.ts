@@ -8,11 +8,13 @@
  * - `'1'` + JSON → Resize terminal `{"cols": N, "rows": N}`
  * - `'2'` → Pause PTY output
  * - `'3'` → Resume PTY output
+ * - `'4'` + JSON → Request snapshot `{"requestId": "..."}`
  *
  * **paircoded → Relay:**
  * - `'0'` + data → PTY output
  * - `'1'` + JSON → Initial handshake / metadata
  * - `'2'` + exit code → PTY exited
+ * - `'3'` + JSON → Snapshot response `{"requestId": "...", "screen": "...", ...}`
  */
 
 // Message type prefixes for relay → client (paircoded) messages
@@ -21,6 +23,7 @@ export const RELAY_PREFIX = {
   RESIZE: 0x31,  // '1'
   PAUSE: 0x32,   // '2'
   RESUME: 0x33,  // '3'
+  REQUEST_SNAPSHOT: 0x34, // '4'
 } as const;
 
 // Message type prefixes for client (paircoded) → relay messages
@@ -28,6 +31,7 @@ export const CLIENT_PREFIX = {
   OUTPUT: 0x30,    // '0'
   HANDSHAKE: 0x31, // '1'
   EXIT: 0x32,      // '2'
+  SNAPSHOT: 0x33,  // '3'
 } as const;
 
 export interface ResizeMessage {
@@ -42,7 +46,7 @@ export interface HandshakeMessage {
   rows?: number;
 }
 
-export type ClientMessageType = 'output' | 'handshake' | 'exit';
+export type ClientMessageType = 'output' | 'handshake' | 'exit' | 'snapshot';
 
 export interface ParsedOutputMessage {
   type: 'output';
@@ -59,7 +63,17 @@ export interface ParsedExitMessage {
   code: number;
 }
 
-export type ParsedClientMessage = ParsedOutputMessage | ParsedHandshakeMessage | ParsedExitMessage;
+export interface ParsedSnapshotMessage {
+  type: 'snapshot';
+  requestId: string;
+  screen: Buffer;
+  cols: number;
+  rows: number;
+  cursorX: number;
+  cursorY: number;
+}
+
+export type ParsedClientMessage = ParsedOutputMessage | ParsedHandshakeMessage | ParsedExitMessage | ParsedSnapshotMessage;
 
 // ============================================================================
 // Control Protocol Types (JSON over control websocket)

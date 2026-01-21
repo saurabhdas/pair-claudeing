@@ -4,7 +4,7 @@
 
 import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
-import { SessionState, type SessionData, type SessionInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest } from './types.js';
+import { SessionState, type SessionData, type SessionInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
 
 // HandshakeMessage is used in setTerminalHandshake method
 import { createChildLogger } from '../utils/logger.js';
@@ -80,8 +80,8 @@ export class Session implements SessionData {
       dataWs: null,
       cols,
       rows,
-      interactiveClients: new Set(),
-      mirrorClients: new Set(),
+      interactiveClients: new Map(),
+      mirrorClients: new Map(),
       handshake: null,
     };
     this.terminals.set(name, terminal);
@@ -127,32 +127,52 @@ export class Session implements SessionData {
 
   /**
    * Add an interactive browser client to a terminal.
+   * Returns the ClientState for requesting snapshots.
    */
-  addInteractiveClient(terminalName: string, ws: WebSocket): void {
+  addInteractiveClient(terminalName: string, ws: WebSocket, snapshotId: string | null = null): ClientState | null {
     const terminal = this.terminals.get(terminalName);
     if (terminal) {
-      terminal.interactiveClients.add(ws);
+      const clientState: ClientState = {
+        ws,
+        needsSnapshot: snapshotId !== null,
+        pendingSnapshotId: snapshotId,
+        bufferedOutput: [],
+      };
+      terminal.interactiveClients.set(ws, clientState);
       log.debug({
         sessionId: this.id,
         terminalName,
         interactiveCount: terminal.interactiveClients.size,
+        needsSnapshot: clientState.needsSnapshot,
       }, 'interactive client added');
+      return clientState;
     }
+    return null;
   }
 
   /**
    * Add a mirror browser client to a terminal.
+   * Returns the ClientState for requesting snapshots.
    */
-  addMirrorClient(terminalName: string, ws: WebSocket): void {
+  addMirrorClient(terminalName: string, ws: WebSocket, snapshotId: string | null = null): ClientState | null {
     const terminal = this.terminals.get(terminalName);
     if (terminal) {
-      terminal.mirrorClients.add(ws);
+      const clientState: ClientState = {
+        ws,
+        needsSnapshot: snapshotId !== null,
+        pendingSnapshotId: snapshotId,
+        bufferedOutput: [],
+      };
+      terminal.mirrorClients.set(ws, clientState);
       log.debug({
         sessionId: this.id,
         terminalName,
         mirrorCount: terminal.mirrorClients.size,
+        needsSnapshot: clientState.needsSnapshot,
       }, 'mirror client added');
+      return clientState;
     }
+    return null;
   }
 
   /**
@@ -173,12 +193,48 @@ export class Session implements SessionData {
   }
 
   /**
+   * Get the ClientState for a websocket in a terminal.
+   */
+  getClientState(terminalName: string, ws: WebSocket): ClientState | undefined {
+    const terminal = this.terminals.get(terminalName);
+    if (!terminal) return undefined;
+    return terminal.interactiveClients.get(ws) ?? terminal.mirrorClients.get(ws);
+  }
+
+  /**
+   * Find a client by pending snapshot ID.
+   */
+  findClientBySnapshotId(terminalName: string, snapshotId: string): ClientState | undefined {
+    const terminal = this.terminals.get(terminalName);
+    if (!terminal) return undefined;
+
+    for (const clientState of terminal.interactiveClients.values()) {
+      if (clientState.pendingSnapshotId === snapshotId) {
+        return clientState;
+      }
+    }
+    for (const clientState of terminal.mirrorClients.values()) {
+      if (clientState.pendingSnapshotId === snapshotId) {
+        return clientState;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Get all clients (interactive + mirror) for a terminal.
    */
-  getAllClients(terminalName: string): Set<WebSocket> {
+  getAllClients(terminalName: string): Map<WebSocket, ClientState> {
     const terminal = this.terminals.get(terminalName);
-    if (!terminal) return new Set();
-    return new Set([...terminal.interactiveClients, ...terminal.mirrorClients]);
+    if (!terminal) return new Map();
+    const allClients = new Map<WebSocket, ClientState>();
+    for (const [ws, state] of terminal.interactiveClients) {
+      allClients.set(ws, state);
+    }
+    for (const [ws, state] of terminal.mirrorClients) {
+      allClients.set(ws, state);
+    }
+    return allClients;
   }
 
   /**
@@ -189,10 +245,10 @@ export class Session implements SessionData {
     if (!terminal) return;
 
     // Close all browser connections for this terminal
-    for (const ws of terminal.interactiveClients) {
+    for (const ws of terminal.interactiveClients.keys()) {
       try { ws.close(1000, 'Terminal closed'); } catch {}
     }
-    for (const ws of terminal.mirrorClients) {
+    for (const ws of terminal.mirrorClients.keys()) {
       try { ws.close(1000, 'Terminal closed'); } catch {}
     }
 

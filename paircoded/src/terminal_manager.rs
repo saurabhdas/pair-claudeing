@@ -132,6 +132,8 @@ impl TerminalManager {
                 data_url,
                 handshake,
                 shutdown_rx,
+                cols,
+                rows,
             )
             .await;
 
@@ -195,8 +197,10 @@ async fn run_terminal_task(
     data_url: Url,
     handshake: HandshakeMessage,
     mut shutdown_rx: oneshot::Receiver<()>,
+    cols: u16,
+    rows: u16,
 ) -> Result<i32> {
-    let mut bridge = Bridge::new(pty).await?;
+    let mut bridge = Bridge::new(pty, cols, rows).await?;
     let mut reconnect_delay = Duration::from_secs(1);
     let max_reconnect_delay = Duration::from_secs(30);
 

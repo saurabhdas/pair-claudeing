@@ -36,6 +36,12 @@ url = "2"
 futures = "0.3"
 futures-util = "0.3"
 
+# Terminal emulation for snapshots
+vt100 = "0.15"
+
+# Base64 encoding for snapshot data
+base64 = "0.22"
+
 [[bin]]
 name = "paircoded"
 path = "src/main.rs"

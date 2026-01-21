@@ -13,6 +13,7 @@ import {
   createResizeMessage,
   parseBrowserSetupMessage,
   createSetupResponse,
+  createRequestSnapshotMessage,
 } from '../protocol/index.js';
 import { SessionManager, SessionState } from '../session/index.js';
 import { requestStartTerminal } from './control-handler.js';
@@ -149,7 +150,18 @@ function handleSetupMessage(
       state.isInteractive = true;
       state.isSetupComplete = true;
 
-      session.addInteractiveClient(name, ws);
+      // Request snapshot for initial state
+      const snapshotId = uuidv4();
+      session.addInteractiveClient(name, ws, snapshotId);
+
+      // Send snapshot request to paircoded via data websocket
+      if (existingTerminal.dataWs && existingTerminal.dataWs.readyState === 1) {
+        const snapshotReq = createRequestSnapshotMessage(snapshotId);
+        existingTerminal.dataWs.send(snapshotReq);
+        log.debug({ sessionId: session.id, terminalName: name, snapshotId }, 'requested snapshot for joining client');
+      } else {
+        log.warn({ sessionId: session.id, terminalName: name }, 'no data connection to request snapshot');
+      }
 
       const response = createSetupResponse(true, name, existingTerminal.cols, existingTerminal.rows);
       ws.send(JSON.stringify(response));
@@ -200,7 +212,18 @@ function handleSetupMessage(
     state.isInteractive = false;
     state.isSetupComplete = true;
 
-    session.addMirrorClient(name, ws);
+    // Request snapshot for initial state
+    const snapshotId = uuidv4();
+    session.addMirrorClient(name, ws, snapshotId);
+
+    // Send snapshot request to paircoded via data websocket
+    if (terminal.dataWs && terminal.dataWs.readyState === 1) {
+      const snapshotReq = createRequestSnapshotMessage(snapshotId);
+      terminal.dataWs.send(snapshotReq);
+      log.debug({ sessionId: session.id, terminalName: name, snapshotId }, 'requested snapshot for mirror client');
+    } else {
+      log.warn({ sessionId: session.id, terminalName: name }, 'no data connection to request snapshot');
+    }
 
     const response = createSetupResponse(true, name, terminal.cols, terminal.rows);
     ws.send(JSON.stringify(response));

@@ -16,6 +16,16 @@ export enum SessionState {
 }
 
 /**
+ * State for tracking a browser client's snapshot/buffering status.
+ */
+export interface ClientState {
+  ws: WebSocket;
+  needsSnapshot: boolean;
+  pendingSnapshotId: string | null;
+  bufferedOutput: Buffer[];
+}
+
+/**
  * Represents a single terminal instance within a session.
  */
 export interface Terminal {
@@ -23,8 +33,8 @@ export interface Terminal {
   dataWs: WebSocket | null;
   cols: number;
   rows: number;
-  interactiveClients: Set<WebSocket>;
-  mirrorClients: Set<WebSocket>;
+  interactiveClients: Map<WebSocket, ClientState>;
+  mirrorClients: Map<WebSocket, ClientState>;
   handshake: HandshakeMessage | null;
 }
 

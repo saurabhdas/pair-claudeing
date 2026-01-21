@@ -11,7 +11,7 @@ import type { Config } from '../config.js';
 
 export { Session } from './session.js';
 export { SessionState } from './types.js';
-export type { SessionInfo, SessionData, Terminal, TerminalInfo, PendingTerminalRequest } from './types.js';
+export type { SessionInfo, SessionData, Terminal, TerminalInfo, PendingTerminalRequest, ClientState } from './types.js';
 
 const log = createChildLogger('session-manager');
 

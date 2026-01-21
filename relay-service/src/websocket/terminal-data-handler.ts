@@ -8,8 +8,8 @@
  */
 
 import type { WebSocket, RawData } from 'ws';
-import { parseClientMessage, createResizeMessage } from '../protocol/index.js';
-import { SessionManager, Session, SessionState } from '../session/index.js';
+import { parseClientMessage, createResizeMessage, type ParsedSnapshotMessage } from '../protocol/index.js';
+import { SessionManager, Session, SessionState, type ClientState } from '../session/index.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const log = createChildLogger('terminal-data-handler');
@@ -88,6 +88,10 @@ function handleDataMessage(
     case 'exit':
       handleExit(session, terminalName, message.code);
       break;
+
+    case 'snapshot':
+      handleSnapshot(session, terminalName, message);
+      break;
   }
 }
 
@@ -114,10 +118,24 @@ function handleOutput(session: Session, terminalName: string, data: Buffer): voi
   if (!terminal) return;
 
   // Forward output to all connected clients (interactive + mirror)
+  // But buffer for clients waiting for snapshots
   const allClients = session.getAllClients(terminalName);
-  for (const browserWs of allClients) {
-    if (browserWs.readyState === 1) { // WebSocket.OPEN
+  let sentCount = 0;
+  let bufferedCount = 0;
+
+  for (const [browserWs, clientState] of allClients) {
+    if (browserWs.readyState !== 1) { // Not WebSocket.OPEN
+      continue;
+    }
+
+    if (clientState.needsSnapshot) {
+      // Buffer output for this client until snapshot arrives
+      clientState.bufferedOutput.push(Buffer.from(data));
+      bufferedCount++;
+    } else {
+      // Send immediately
       browserWs.send(data);
+      sentCount++;
     }
   }
 
@@ -125,8 +143,65 @@ function handleOutput(session: Session, terminalName: string, data: Buffer): voi
     sessionId: session.id,
     terminalName,
     bytes: data.length,
-    clients: allClients.size,
+    sentCount,
+    bufferedCount,
   }, 'forwarded output to clients');
+}
+
+function handleSnapshot(
+  session: Session,
+  terminalName: string,
+  snapshot: ParsedSnapshotMessage
+): void {
+  log.debug({
+    sessionId: session.id,
+    terminalName,
+    requestId: snapshot.requestId,
+    screenBytes: snapshot.screen.length,
+    cols: snapshot.cols,
+    rows: snapshot.rows,
+    cursorX: snapshot.cursorX,
+    cursorY: snapshot.cursorY,
+  }, 'received terminal snapshot');
+
+  // Find the client waiting for this snapshot
+  const clientState = session.findClientBySnapshotId(terminalName, snapshot.requestId);
+  if (!clientState) {
+    log.warn({
+      sessionId: session.id,
+      terminalName,
+      requestId: snapshot.requestId,
+    }, 'no client found waiting for snapshot');
+    return;
+  }
+
+  const ws = clientState.ws;
+  if (ws.readyState !== 1) { // Not WebSocket.OPEN
+    log.warn({ sessionId: session.id, terminalName }, 'client disconnected before receiving snapshot');
+    return;
+  }
+
+  // Send snapshot screen data to the client
+  ws.send(snapshot.screen);
+
+  log.debug({
+    sessionId: session.id,
+    terminalName,
+    requestId: snapshot.requestId,
+    bufferedChunks: clientState.bufferedOutput.length,
+  }, 'sent snapshot to client, flushing buffered output');
+
+  // Flush buffered output to the client
+  for (const bufferedData of clientState.bufferedOutput) {
+    if (ws.readyState === 1) {
+      ws.send(bufferedData);
+    }
+  }
+
+  // Clear state - client is now in sync
+  clientState.needsSnapshot = false;
+  clientState.pendingSnapshotId = null;
+  clientState.bufferedOutput = [];
 }
 
 function handleExit(session: Session, terminalName: string, code: number): void {
@@ -137,12 +212,12 @@ function handleExit(session: Session, terminalName: string, code: number): void 
 
   // Notify all clients
   const exitMessage = JSON.stringify({ type: 'exit', code });
-  for (const ws of terminal.interactiveClients) {
+  for (const ws of terminal.interactiveClients.keys()) {
     if (ws.readyState === 1) {
       ws.send(exitMessage);
     }
   }
-  for (const ws of terminal.mirrorClients) {
+  for (const ws of terminal.mirrorClients.keys()) {
     if (ws.readyState === 1) {
       ws.send(exitMessage);
     }
@@ -162,12 +237,12 @@ function handleDataDisconnect(session: Session, terminalName: string): void {
 
   // Notify clients
   const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'data_connection_lost' });
-  for (const ws of terminal.interactiveClients) {
+  for (const ws of terminal.interactiveClients.keys()) {
     if (ws.readyState === 1) {
       ws.send(disconnectMessage);
     }
   }
-  for (const ws of terminal.mirrorClients) {
+  for (const ws of terminal.mirrorClients.keys()) {
     if (ws.readyState === 1) {
       ws.send(disconnectMessage);
     }

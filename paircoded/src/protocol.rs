@@ -7,11 +7,13 @@
 //! - `'1'` + JSON → Resize terminal `{"cols": N, "rows": N}`
 //! - `'2'` → Pause PTY output
 //! - `'3'` → Resume PTY output
+//! - `'4'` + JSON → Request snapshot `{"requestId": "..."}`
 //!
 //! **Client (paircoded) → Server (Relay):**
 //! - `'0'` + data → PTY output
 //! - `'1'` + JSON → Initial handshake / metadata
 //! - `'2'` + exit code → PTY exited
+//! - `'3'` + JSON → Snapshot response `{"requestId": "...", "screen": "...", ...}`
 //!
 //! ## Control Protocol (JSON, control websocket)
 //!
@@ -33,6 +35,7 @@ pub mod relay_prefix {
     pub const RESIZE: u8 = b'1';
     pub const PAUSE: u8 = b'2';
     pub const RESUME: u8 = b'3';
+    pub const REQUEST_SNAPSHOT: u8 = b'4';
 }
 
 /// Message type prefixes for client → relay messages
@@ -40,6 +43,7 @@ pub mod client_prefix {
     pub const OUTPUT: u8 = b'0';
     pub const HANDSHAKE: u8 = b'1';
     pub const EXIT: u8 = b'2';
+    pub const SNAPSHOT: u8 = b'3';
 }
 
 /// Terminal resize dimensions
@@ -60,6 +64,49 @@ pub struct HandshakeMessage {
     pub rows: Option<u16>,
 }
 
+/// Request for terminal state snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+}
+
+/// Terminal state snapshot response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotMessage {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    /// Screen content with ANSI escape sequences (base64 encoded in JSON)
+    #[serde(with = "base64_serde")]
+    pub screen: Vec<u8>,
+    pub cols: u16,
+    pub rows: u16,
+    #[serde(rename = "cursorX")]
+    pub cursor_x: u16,
+    #[serde(rename = "cursorY")]
+    pub cursor_y: u16,
+}
+
+mod base64_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Messages received from the relay
 #[derive(Debug)]
 pub enum RelayMessage {
@@ -71,6 +118,8 @@ pub enum RelayMessage {
     Pause,
     /// Resume PTY output
     Resume,
+    /// Request terminal state snapshot
+    RequestSnapshot(SnapshotRequest),
 }
 
 /// Messages sent to the relay
@@ -82,6 +131,8 @@ pub enum ClientMessage {
     Handshake(HandshakeMessage),
     /// PTY process exited
     Exit(i32),
+    /// Terminal state snapshot
+    Snapshot(SnapshotMessage),
 }
 
 impl RelayMessage {
@@ -102,6 +153,10 @@ impl RelayMessage {
             }
             relay_prefix::PAUSE => Ok(RelayMessage::Pause),
             relay_prefix::RESUME => Ok(RelayMessage::Resume),
+            relay_prefix::REQUEST_SNAPSHOT => {
+                let request: SnapshotRequest = serde_json::from_slice(payload)?;
+                Ok(RelayMessage::RequestSnapshot(request))
+            }
             _ => Err(anyhow!("unknown message prefix: {}", prefix)),
         }
     }
@@ -128,6 +183,13 @@ impl ClientMessage {
                 let json = serde_json::to_vec(code)?;
                 let mut msg = Vec::with_capacity(1 + json.len());
                 msg.push(client_prefix::EXIT);
+                msg.extend_from_slice(&json);
+                Ok(msg)
+            }
+            ClientMessage::Snapshot(snapshot) => {
+                let json = serde_json::to_vec(snapshot)?;
+                let mut msg = Vec::with_capacity(1 + json.len());
+                msg.push(client_prefix::SNAPSHOT);
                 msg.extend_from_slice(&json);
                 Ok(msg)
             }
@@ -319,5 +381,39 @@ mod tests {
         assert_eq!(json["type"], "terminal_closed");
         assert_eq!(json["name"], "main");
         assert_eq!(json["exitCode"], 0);
+    }
+
+    #[test]
+    fn test_parse_request_snapshot() {
+        let data = b"4{\"requestId\":\"abc123\"}";
+        let msg = RelayMessage::parse(data).unwrap();
+        match msg {
+            RelayMessage::RequestSnapshot(req) => {
+                assert_eq!(req.request_id, "abc123");
+            }
+            _ => panic!("expected RequestSnapshot"),
+        }
+    }
+
+    #[test]
+    fn test_encode_snapshot() {
+        let msg = ClientMessage::Snapshot(SnapshotMessage {
+            request_id: "abc123".to_string(),
+            screen: b"hello\x1b[31mworld".to_vec(),
+            cols: 80,
+            rows: 24,
+            cursor_x: 5,
+            cursor_y: 0,
+        });
+        let encoded = msg.encode().unwrap();
+        assert_eq!(encoded[0], b'3');
+        let json: serde_json::Value = serde_json::from_slice(&encoded[1..]).unwrap();
+        assert_eq!(json["requestId"], "abc123");
+        assert_eq!(json["cols"], 80);
+        assert_eq!(json["rows"], 24);
+        assert_eq!(json["cursorX"], 5);
+        assert_eq!(json["cursorY"], 0);
+        // Screen is base64 encoded
+        assert!(json["screen"].is_string());
     }
 }
