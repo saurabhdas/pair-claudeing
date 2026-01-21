@@ -32,6 +32,9 @@ anyhow = "1"
 # URL parsing
 url = "2"
 
+# Friendly name generation
+petname = "2"
+
 # Async utilities
 futures = "0.3"
 futures-util = "0.3"

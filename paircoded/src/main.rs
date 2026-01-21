@@ -48,10 +48,16 @@ async fn main() -> Result<()> {
 
     setup_logging(config.verbose);
 
+    // Print user-friendly session info (always visible regardless of log level)
+    println!();
+    println!("  Session: {}", config.session_name);
+    println!("  Pair at: {}", config.browser_url);
+    println!();
+
     info!(
         relay_url = %config.relay_url,
         shell = %config.shell,
-        "starting paircoded (control-connection mode)"
+        "starting paircoded"
     );
 
     // Get shell command and args

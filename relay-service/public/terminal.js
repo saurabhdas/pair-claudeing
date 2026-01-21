@@ -1,49 +1,57 @@
 /**
- * Terminal client for relay-service.
- * Split view: left terminal + right terminal
+ * Terminal client for relay-service with cross-session split view.
  *
- * URL parameters:
- * - left: terminal name for left panel (default: 'main')
- * - right: terminal name for right panel (default: mirror of left)
- * - terminal/name: single terminal name (legacy, uses mirror for right)
+ * URL format: /terminal/<session1>:<terminal1>/<session2>:<terminal2>
+ * If :terminalN is omitted, defaults to "main"
  *
  * Examples:
- * - /terminal/session123?left=main&right=other  - Two different terminals
- * - /terminal/session123?left=main              - Left interactive, right mirrors left
- * - /terminal/session123                        - Both use 'main' (left interactive, right mirror)
+ * - /terminal/curious-panda/fancy-elephant         - Two sessions, both using "main" terminal
+ * - /terminal/session1:term-a/session2:term-b      - Two sessions with specific terminals
+ * - /terminal/session1/session1                    - Same session on both sides
  */
 
 (function() {
   'use strict';
 
-  // Get session ID from URL path or query param
-  function getSessionId() {
-    const pathMatch = window.location.pathname.match(/\/terminal\/([^\/]+)/);
-    if (pathMatch) return pathMatch[1];
-    const params = new URLSearchParams(window.location.search);
-    return params.get('session') || params.get('sessionId');
+  /**
+   * Parse a panel segment from URL path.
+   * Format: "sessionId" or "sessionId:terminalName"
+   * @param {string} segment - URL path segment
+   * @returns {{ sessionId: string, terminalName: string }}
+   */
+  function parsePanelSegment(segment) {
+    if (!segment) {
+      return null;
+    }
+    const colonIndex = segment.indexOf(':');
+    if (colonIndex === -1) {
+      return { sessionId: segment, terminalName: 'main' };
+    }
+    return {
+      sessionId: segment.substring(0, colonIndex),
+      terminalName: segment.substring(colonIndex + 1) || 'main',
+    };
   }
 
-  // Get terminal names from query params
-  function getTerminalNames() {
-    const params = new URLSearchParams(window.location.search);
-
-    // New format: ?left=name1&right=name2
-    const left = params.get('left');
-    const right = params.get('right');
-
-    if (left && right) {
-      return { left, right, rightIsMirror: left === right };
+  /**
+   * Parse URL to get left and right panel configurations.
+   * URL format: /terminal/<left>/<right>
+   * @returns {{ left: { sessionId: string, terminalName: string }, right: { sessionId: string, terminalName: string } } | null}
+   */
+  function parseUrl() {
+    const pathMatch = window.location.pathname.match(/\/terminal\/([^\/]+)\/([^\/]+)/);
+    if (!pathMatch) {
+      return null;
     }
 
-    if (left) {
-      // Only left specified - right mirrors left
-      return { left, right: left, rightIsMirror: true };
+    const left = parsePanelSegment(pathMatch[1]);
+    const right = parsePanelSegment(pathMatch[2]);
+
+    if (!left || !right) {
+      return null;
     }
 
-    // Legacy format: ?terminal=name or ?name=name
-    const single = params.get('terminal') || params.get('name') || 'main';
-    return { left: single, right: single, rightIsMirror: true };
+    return { left, right };
   }
 
   // Status indicator
@@ -93,14 +101,8 @@
   };
 
   // Create a terminal with addons
-  function createTerminal(container, isReadOnly) {
-    const config = { ...termConfig };
-    if (isReadOnly) {
-      config.disableStdin = true;
-      config.cursorBlink = false;
-    }
-
-    const term = new Terminal(config);
+  function createTerminal(container) {
+    const term = new Terminal(termConfig);
 
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
@@ -118,34 +120,40 @@
     return { term, fitAddon };
   }
 
-  // Get session ID and terminal names
-  const sessionId = getSessionId();
-  const terminalNames = getTerminalNames();
+  // Parse URL
+  const config = parseUrl();
 
-  // Create left terminal (always interactive)
+  // Create terminals
   const leftContainer = document.getElementById('terminal-left');
-  const { term: termLeft, fitAddon: fitLeft } = createTerminal(leftContainer, false);
+  const { term: termLeft, fitAddon: fitLeft } = createTerminal(leftContainer);
 
-  // Create right terminal (interactive if different name, read-only if mirror)
   const rightContainer = document.getElementById('terminal-right');
-  const { term: termRight, fitAddon: fitRight } = createTerminal(rightContainer, terminalNames.rightIsMirror);
+  const { term: termRight, fitAddon: fitRight } = createTerminal(rightContainer);
 
-  if (!sessionId) {
-    setStatus('error', 'No session ID');
-    termLeft.writeln('\r\n\x1b[31mError: No session ID provided.\x1b[0m');
-    termLeft.writeln('\r\nUsage:');
-    termLeft.writeln('  /terminal/{sessionId}');
-    termLeft.writeln('  /terminal/{sessionId}?left=term1&right=term2');
-    termLeft.writeln('  /?session={sessionId}');
+  // Update panel headers
+  function updatePanelHeaders() {
+    const leftHeader = document.querySelector('.panel:first-child .panel-header');
+    const rightHeader = document.querySelector('.panel:last-child .panel-header');
+
+    if (config) {
+      leftHeader.textContent = `${config.left.sessionId}:${config.left.terminalName}`;
+      rightHeader.textContent = `${config.right.sessionId}:${config.right.terminalName}`;
+    }
+  }
+
+  if (!config) {
+    setStatus('error', 'Invalid URL');
+    termLeft.writeln('\r\n\x1b[31mError: Invalid URL format.\x1b[0m');
+    termLeft.writeln('\r\nExpected: /terminal/<session1>/<session2>');
+    termLeft.writeln('          /terminal/<session1>:<terminal1>/<session2>:<terminal2>');
+    termLeft.writeln('\r\nExamples:');
+    termLeft.writeln('  /terminal/curious-panda/fancy-elephant');
+    termLeft.writeln('  /terminal/session1:main/session2:main');
     return;
   }
 
-  // Display terminal names
-  console.log('Terminal names:', terminalNames);
-
-  // WebSocket URL
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}`;
+  updatePanelHeaders();
+  console.log('Panel config:', config);
 
   // Connection state
   let wsLeft = null;
@@ -156,17 +164,19 @@
   const maxReconnectAttempts = 5;
 
   const textDecoder = new TextDecoder('utf-8', { fatal: false });
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 
   /**
    * Create a websocket connection for a terminal panel.
-   * @param {string} terminalName - Name of the terminal to connect to
-   * @param {string} action - 'new' for interactive, 'mirror' for read-only
+   * @param {string} sessionId - Session ID to connect to
+   * @param {string} terminalName - Terminal name within the session
    * @param {Terminal} term - The xterm.js terminal instance
    * @param {FitAddon} fitAddon - The fit addon for this terminal
    * @param {string} side - 'left' or 'right' for logging
    * @param {function} onSetupComplete - Callback when setup succeeds
    */
-  function createConnection(terminalName, action, term, fitAddon, side, onSetupComplete) {
+  function createConnection(sessionId, terminalName, term, fitAddon, side, onSetupComplete) {
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}`;
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
@@ -174,13 +184,13 @@
       const dims = fitAddon.proposeDimensions();
       const setupMsg = {
         type: 'setup',
-        action: action,
+        action: 'new',
         name: terminalName,
         cols: dims ? dims.cols : 80,
         rows: dims ? dims.rows : 24,
       };
       ws.send(JSON.stringify(setupMsg));
-      console.log(`[${side}] Sent setup (${action}, ${terminalName}):`, setupMsg);
+      console.log(`[${side}] Sent setup to ${sessionId}:`, setupMsg);
     };
 
     ws.onmessage = function(event) {
@@ -199,16 +209,11 @@
 
     ws.onclose = function(event) {
       console.log(`[${side}] WebSocket closed:`, event.code, event.reason);
-      if (side === 'left') {
-        handleLeftClose(event, term);
-      }
+      handleClose(event, term, side);
     };
 
     ws.onerror = function(error) {
       console.error(`[${side}] WebSocket error:`, error);
-      if (side === 'left') {
-        setStatus('error', 'Connection error');
-      }
     };
 
     return ws;
@@ -222,17 +227,11 @@
           if (onSetupComplete) onSetupComplete();
         } else {
           term.writeln(`\r\n\x1b[31mSetup failed: ${msg.error || 'Unknown error'}\x1b[0m`);
-          if (side === 'left') {
-            setStatus('error', 'Setup failed');
-          }
         }
         break;
 
       case 'exit':
         term.writeln(`\r\n\x1b[33mProcess exited with code ${msg.code}\x1b[0m`);
-        if (side === 'left') {
-          setStatus('disconnected', 'Exited');
-        }
         break;
 
       case 'disconnect':
@@ -244,9 +243,7 @@
     }
   }
 
-  function handleLeftClose(event, term) {
-    setStatus('disconnected', 'Disconnected');
-
+  function handleClose(event, term, side) {
     if (event.code === 4404) {
       term.writeln('\r\n\x1b[31mSession not found.\x1b[0m');
       return;
@@ -258,13 +255,15 @@
       term.writeln('\r\n\x1b[31mSetup timeout.\x1b[0m');
     }
 
-    if (reconnectAttempts < maxReconnectAttempts) {
+    // Only reconnect from left side to avoid double reconnects
+    if (side === 'left' && reconnectAttempts < maxReconnectAttempts) {
       reconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
       setStatus('connecting', `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
       setTimeout(connect, delay);
-    } else {
+    } else if (side === 'left') {
       term.writeln('\r\n\x1b[31mConnection lost. Refresh to retry.\x1b[0m');
+      setStatus('disconnected', 'Disconnected');
     }
   }
 
@@ -284,10 +283,10 @@
     leftSetupComplete = false;
     rightSetupComplete = false;
 
-    // Connect left panel (always 'new' - interactive)
+    // Connect both panels in parallel
     wsLeft = createConnection(
-      terminalNames.left,
-      'new',
+      config.left.sessionId,
+      config.left.terminalName,
       termLeft,
       fitLeft,
       'left',
@@ -295,37 +294,35 @@
         leftSetupComplete = true;
         reconnectAttempts = 0;
         updateStatus();
+      }
+    );
 
-        // Connect right panel after left succeeds
-        const rightAction = terminalNames.rightIsMirror ? 'mirror' : 'new';
-        wsRight = createConnection(
-          terminalNames.right,
-          rightAction,
-          termRight,
-          fitRight,
-          'right',
-          function() {
-            rightSetupComplete = true;
-            updateStatus();
-          }
-        );
+    wsRight = createConnection(
+      config.right.sessionId,
+      config.right.terminalName,
+      termRight,
+      fitRight,
+      'right',
+      function() {
+        rightSetupComplete = true;
+        updateStatus();
       }
     );
   }
 
   function updateStatus() {
+    const leftLabel = `${config.left.sessionId}:${config.left.terminalName}`;
+    const rightLabel = `${config.right.sessionId}:${config.right.terminalName}`;
+
     if (leftSetupComplete && rightSetupComplete) {
-      if (terminalNames.left === terminalNames.right) {
-        setStatus('connected', `Connected: ${terminalNames.left}`);
-      } else {
-        setStatus('connected', `Connected: ${terminalNames.left} | ${terminalNames.right}`);
-      }
-    } else if (leftSetupComplete) {
-      setStatus('connected', `Connected: ${terminalNames.left} (right pending...)`);
+      setStatus('connected', `Connected`);
+    } else if (leftSetupComplete || rightSetupComplete) {
+      const pending = !leftSetupComplete ? 'left' : 'right';
+      setStatus('connecting', `${pending} pending...`);
     }
   }
 
-  function sendResize(ws, fitAddon, terminalName) {
+  function sendResize(ws, fitAddon) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       const dims = fitAddon.proposeDimensions();
       if (dims) {
@@ -334,7 +331,6 @@
           cols: dims.cols,
           rows: dims.rows,
         }));
-        console.log(`Sent resize for ${terminalName}:`, dims.cols, 'x', dims.rows);
       }
     }
   }
@@ -352,20 +348,18 @@
     }
   });
 
-  // Handle terminal input from RIGHT terminal (only if not a mirror)
-  if (!terminalNames.rightIsMirror) {
-    termRight.onData(function(data) {
-      if (wsRight && wsRight.readyState === WebSocket.OPEN && rightSetupComplete) {
-        wsRight.send(JSON.stringify({ type: 'input', data: data }));
-      }
-    });
+  // Handle terminal input from RIGHT terminal
+  termRight.onData(function(data) {
+    if (wsRight && wsRight.readyState === WebSocket.OPEN && rightSetupComplete) {
+      wsRight.send(JSON.stringify({ type: 'input', data: data }));
+    }
+  });
 
-    termRight.onBinary(function(data) {
-      if (wsRight && wsRight.readyState === WebSocket.OPEN && rightSetupComplete) {
-        wsRight.send(JSON.stringify({ type: 'input', data: data }));
-      }
-    });
-  }
+  termRight.onBinary(function(data) {
+    if (wsRight && wsRight.readyState === WebSocket.OPEN && rightSetupComplete) {
+      wsRight.send(JSON.stringify({ type: 'input', data: data }));
+    }
+  });
 
   // Handle window resize
   let resizeTimeout;
@@ -376,12 +370,10 @@
       fitRight.fit();
 
       if (leftSetupComplete) {
-        sendResize(wsLeft, fitLeft, terminalNames.left);
+        sendResize(wsLeft, fitLeft);
       }
-
-      // Only send resize for right if it's a different terminal (not a mirror)
-      if (rightSetupComplete && !terminalNames.rightIsMirror) {
-        sendResize(wsRight, fitRight, terminalNames.right);
+      if (rightSetupComplete) {
+        sendResize(wsRight, fitRight);
       }
     }, 100);
   });

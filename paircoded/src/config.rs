@@ -9,8 +9,12 @@ use url::Url;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// WebSocket URL of the relay service (ws:// or wss://)
-    pub relay_url: String,
+    /// Relay server address (HOST:PORT, e.g., localhost:8080)
+    pub relay: String,
+
+    /// Session name (default: auto-generated friendly name)
+    #[arg(short = 'n', long)]
+    pub session: Option<String>,
 
     /// Shell to spawn (default: $SHELL or /bin/sh)
     #[arg(short, long)]
@@ -35,6 +39,12 @@ pub struct Config {
     /// Parsed and validated relay URL
     pub relay_url: Url,
 
+    /// Session name (e.g., "curious-purple-panda")
+    pub session_name: String,
+
+    /// Browser URL to display to user
+    pub browser_url: String,
+
     /// Shell command to execute
     pub shell: String,
 
@@ -51,18 +61,17 @@ pub struct Config {
 impl Config {
     /// Create configuration from CLI arguments
     pub fn from_args(args: Args) -> Result<Self> {
-        // Validate and parse the relay URL
-        let relay_url = Url::parse(&args.relay_url)
-            .map_err(|e| anyhow!("invalid relay URL: {}", e))?;
+        // Generate or use provided session name
+        let session_name = args.session.unwrap_or_else(|| {
+            petname::petname(3, "-").unwrap_or_else(|| "session".to_string())
+        });
 
-        // Ensure it's a websocket URL
-        match relay_url.scheme() {
-            "ws" | "wss" => {}
-            scheme => return Err(anyhow!(
-                "relay URL must use ws:// or wss:// scheme, got: {}://",
-                scheme
-            )),
-        }
+        // Construct WebSocket URL from relay address
+        let relay_url = Url::parse(&format!("ws://{}/ws/control/{}", args.relay, session_name))
+            .map_err(|e| anyhow!("invalid relay address '{}': {}", args.relay, e))?;
+
+        // Construct browser URL for display (new format requires two sessions)
+        let browser_url = format!("http://{}/terminal/{}/<other-session>", args.relay, session_name);
 
         // Determine shell to use
         let shell = args.shell.unwrap_or_else(|| {
@@ -71,6 +80,8 @@ impl Config {
 
         Ok(Config {
             relay_url,
+            session_name,
+            browser_url,
             shell,
             command: args.command,
             verbose: args.verbose,
@@ -95,9 +106,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_ws_url() {
+    fn test_auto_generated_session() {
         let args = Args {
-            relay_url: "ws://localhost:8080".to_string(),
+            relay: "localhost:8080".to_string(),
+            session: None,
             shell: None,
             command: None,
             verbose: false,
@@ -105,38 +117,52 @@ mod tests {
         };
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.relay_url.scheme(), "ws");
+        assert!(!config.session_name.is_empty());
+        assert!(config.browser_url.contains(&config.session_name));
     }
 
     #[test]
-    fn test_valid_wss_url() {
+    fn test_custom_session_name() {
         let args = Args {
-            relay_url: "wss://relay.example.com/connect".to_string(),
+            relay: "localhost:8080".to_string(),
+            session: Some("my-custom-session".to_string()),
             shell: None,
             command: None,
             verbose: false,
             no_reconnect: false,
         };
         let config = Config::from_args(args).unwrap();
-        assert_eq!(config.relay_url.scheme(), "wss");
+        assert_eq!(config.session_name, "my-custom-session");
+        assert!(config.relay_url.as_str().contains("my-custom-session"));
+        assert!(config.browser_url.contains("my-custom-session"));
     }
 
     #[test]
-    fn test_invalid_scheme() {
+    fn test_url_construction() {
         let args = Args {
-            relay_url: "http://localhost:8080".to_string(),
+            relay: "relay.example.com:9000".to_string(),
+            session: Some("test-session".to_string()),
             shell: None,
             command: None,
             verbose: false,
             no_reconnect: false,
         };
-        let result = Config::from_args(args);
-        assert!(result.is_err());
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(
+            config.relay_url.as_str(),
+            "ws://relay.example.com:9000/ws/control/test-session"
+        );
+        assert_eq!(
+            config.browser_url,
+            "http://relay.example.com:9000/terminal/test-session/<other-session>"
+        );
     }
 
     #[test]
     fn test_custom_shell() {
         let args = Args {
-            relay_url: "ws://localhost:8080".to_string(),
+            relay: "localhost:8080".to_string(),
+            session: None,
             shell: Some("/bin/zsh".to_string()),
             command: None,
             verbose: false,

@@ -46,8 +46,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     root: publicDir,
   });
 
-  // Terminal page route (serves index.html for /terminal/:sessionId)
-  fastify.get('/terminal/:sessionId', async (request, reply) => {
+  // Terminal page route (serves index.html for split-view)
+  // URL format: /terminal/<session1>:<terminal1>/<session2>:<terminal2>
+  // If :terminalN is omitted, defaults to "main"
+  fastify.get('/terminal/:left/:right', async (request, reply) => {
     return reply.sendFile('index.html');
   });
 
@@ -113,7 +115,8 @@ export async function startServer(
     console.log(`  - Browser:       ws://${config.host}:${config.port}/ws/terminal/:sessionId`);
     console.log(`\nHTTP endpoints:`);
     console.log(`  - Health:        http://${config.host}:${config.port}/api/health`);
-    console.log(`  - Terminal page: http://${config.host}:${config.port}/terminal/:sessionId`);
+    console.log(`  - Terminal page: http://${config.host}:${config.port}/terminal/:left/:right`);
+    console.log(`                   Format: session1[:terminal1]/session2[:terminal2]`);
   } catch (error) {
     log.error({ error }, 'failed to start server');
     throw error;
