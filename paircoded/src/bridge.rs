@@ -7,9 +7,8 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::protocol::{ClientMessage, HandshakeMessage, RelayMessage};
+use crate::protocol::{ClientMessage, RelayMessage};
 use crate::pty::AsyncPty;
-use crate::relay::RelayConnection;
 
 /// Bridge connecting PTY to relay
 pub struct Bridge {
@@ -146,70 +145,5 @@ impl Bridge {
         }
 
         Ok(None)
-    }
-}
-
-/// Run the full bridge lifecycle with reconnection support
-pub async fn run_bridge_loop(
-    pty: AsyncPty,
-    relay_url: &url::Url,
-    handshake: HandshakeMessage,
-    reconnect: bool,
-    max_reconnects: u32,
-) -> Result<i32> {
-    use crate::relay::ReconnectManager;
-
-    let mut bridge = Bridge::new(pty).await?;
-    let mut reconnect_mgr = ReconnectManager::new(max_reconnects);
-
-    loop {
-        // Connect to relay
-        match RelayConnection::connect(relay_url, handshake.clone()).await {
-            Ok(conn) => {
-                reconnect_mgr.reset();
-                let (tx, rx) = conn.into_receiver();
-
-                // Run bridge until disconnection or PTY exit
-                match bridge.run(tx, rx).await {
-                    Ok(Some(exit_code)) => {
-                        // PTY exited
-                        return Ok(exit_code);
-                    }
-                    Ok(None) => {
-                        // Relay disconnected
-                        if !reconnect {
-                            warn!("relay disconnected, not reconnecting");
-                            return Ok(1);
-                        }
-                        warn!("relay disconnected, will reconnect");
-                    }
-                    Err(e) => {
-                        error!(error = %e, "bridge error");
-                        if !reconnect {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "failed to connect to relay");
-                if !reconnect {
-                    return Err(e);
-                }
-            }
-        }
-
-        // Wait before reconnecting
-        if let Some(delay) = reconnect_mgr.next_delay() {
-            info!(
-                delay_ms = delay.as_millis(),
-                attempt = reconnect_mgr.attempts(),
-                "waiting before reconnect"
-            );
-            tokio::time::sleep(delay).await;
-        } else {
-            error!("max reconnection attempts reached");
-            return Ok(1);
-        }
     }
 }

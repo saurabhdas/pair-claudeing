@@ -1,6 +1,6 @@
 //! Protocol message encoding and decoding for relay communication.
 //!
-//! Follows a ttyd-inspired binary protocol:
+//! ## Terminal Data Protocol (Binary, per-terminal websocket)
 //!
 //! **Server (Relay) → Client (paircoded):**
 //! - `'0'` + data → Input to PTY (keystrokes)
@@ -12,6 +12,17 @@
 //! - `'0'` + data → PTY output
 //! - `'1'` + JSON → Initial handshake / metadata
 //! - `'2'` + exit code → PTY exited
+//!
+//! ## Control Protocol (JSON, control websocket)
+//!
+//! **Relay → Paircoded:**
+//! - `{"type": "start_terminal", "name": "...", "cols": N, "rows": N, "requestId": "..."}`
+//! - `{"type": "close_terminal", "name": "...", "signal": N}`
+//!
+//! **Paircoded → Relay:**
+//! - `{"type": "control_handshake", "version": "..."}`
+//! - `{"type": "terminal_started", "name": "...", "requestId": "...", "success": bool, "error": "..."}`
+//! - `{"type": "terminal_closed", "name": "...", "exitCode": N}`
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -124,6 +135,74 @@ impl ClientMessage {
     }
 }
 
+// ============================================================================
+// Control Protocol Messages (JSON over control websocket)
+// ============================================================================
+
+/// Control messages received from the relay on the control connection
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ControlMessage {
+    /// Request to start a new terminal
+    StartTerminal {
+        name: String,
+        cols: u16,
+        rows: u16,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Request to close a terminal
+    CloseTerminal {
+        name: String,
+        #[serde(default)]
+        signal: Option<i32>,
+    },
+}
+
+/// Control responses sent to the relay on the control connection
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ControlResponse {
+    /// Initial handshake on control connection
+    ControlHandshake {
+        version: String,
+    },
+    /// Response to start_terminal request
+    TerminalStarted {
+        name: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Notification that a terminal has closed
+    TerminalClosed {
+        name: String,
+        #[serde(rename = "exitCode")]
+        exit_code: i32,
+    },
+}
+
+impl ControlMessage {
+    /// Parse a JSON control message from the relay
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        serde_json::from_slice(data).map_err(|e| anyhow!("failed to parse control message: {}", e))
+    }
+
+    /// Parse from a string
+    pub fn parse_str(data: &str) -> Result<Self> {
+        serde_json::from_str(data).map_err(|e| anyhow!("failed to parse control message: {}", e))
+    }
+}
+
+impl ControlResponse {
+    /// Encode a control response to JSON
+    pub fn encode(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(|e| anyhow!("failed to encode control response: {}", e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +250,74 @@ mod tests {
         assert_eq!(encoded[0], b'1');
         let json: serde_json::Value = serde_json::from_slice(&encoded[1..]).unwrap();
         assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[test]
+    fn test_parse_control_start_terminal() {
+        let json = r#"{"type":"start_terminal","name":"main","cols":80,"rows":24,"requestId":"abc123"}"#;
+        let msg = ControlMessage::parse_str(json).unwrap();
+        match msg {
+            ControlMessage::StartTerminal { name, cols, rows, request_id } => {
+                assert_eq!(name, "main");
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+                assert_eq!(request_id, "abc123");
+            }
+            _ => panic!("expected StartTerminal"),
+        }
+    }
+
+    #[test]
+    fn test_parse_control_close_terminal() {
+        let json = r#"{"type":"close_terminal","name":"main","signal":15}"#;
+        let msg = ControlMessage::parse_str(json).unwrap();
+        match msg {
+            ControlMessage::CloseTerminal { name, signal } => {
+                assert_eq!(name, "main");
+                assert_eq!(signal, Some(15));
+            }
+            _ => panic!("expected CloseTerminal"),
+        }
+    }
+
+    #[test]
+    fn test_encode_control_handshake() {
+        let msg = ControlResponse::ControlHandshake {
+            version: "1.0".to_string(),
+        };
+        let encoded = msg.encode().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(json["type"], "control_handshake");
+        assert_eq!(json["version"], "1.0");
+    }
+
+    #[test]
+    fn test_encode_terminal_started() {
+        let msg = ControlResponse::TerminalStarted {
+            name: "main".to_string(),
+            request_id: "abc123".to_string(),
+            success: true,
+            error: None,
+        };
+        let encoded = msg.encode().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(json["type"], "terminal_started");
+        assert_eq!(json["name"], "main");
+        assert_eq!(json["requestId"], "abc123");
+        assert_eq!(json["success"], true);
+        assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn test_encode_terminal_closed() {
+        let msg = ControlResponse::TerminalClosed {
+            name: "main".to_string(),
+            exit_code: 0,
+        };
+        let encoded = msg.encode().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(json["type"], "terminal_closed");
+        assert_eq!(json["name"], "main");
+        assert_eq!(json["exitCode"], 0);
     }
 }

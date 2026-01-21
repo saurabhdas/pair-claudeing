@@ -8,8 +8,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { SessionManager } from '../session/index.js';
-import { handlePaircodedConnection } from '../websocket/paircoded-handler.js';
 import { handleBrowserConnection } from '../websocket/browser-handler.js';
+import { handleControlConnection } from '../websocket/control-handler.js';
+import { handleTerminalDataConnection } from '../websocket/terminal-data-handler.js';
 import { registerHttpRoutes } from './http-routes.js';
 import { createChildLogger } from '../utils/logger.js';
 import type { Config } from '../config.js';
@@ -53,14 +54,25 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
   // Register HTTP routes
   await registerHttpRoutes(fastify, { sessionManager });
 
-  // WebSocket route for paircoded connections
+  // WebSocket route for paircoded CONTROL connections
   fastify.get<{ Params: { sessionId: string } }>(
-    '/ws/session/:sessionId',
+    '/ws/control/:sessionId',
     { websocket: true },
     (socket, request) => {
       const { sessionId } = request.params;
-      log.info({ sessionId, remoteAddress: request.ip }, 'paircoded WebSocket connection');
-      handlePaircodedConnection(socket, sessionId, { sessionManager });
+      log.info({ sessionId, remoteAddress: request.ip }, 'paircoded control WebSocket connection');
+      handleControlConnection(socket, sessionId, { sessionManager });
+    }
+  );
+
+  // WebSocket route for paircoded TERMINAL DATA connections
+  fastify.get<{ Params: { sessionId: string; terminalName: string } }>(
+    '/ws/terminal-data/:sessionId/:terminalName',
+    { websocket: true },
+    (socket, request) => {
+      const { sessionId, terminalName } = request.params;
+      log.info({ sessionId, terminalName, remoteAddress: request.ip }, 'terminal data WebSocket connection');
+      handleTerminalDataConnection(socket, sessionId, terminalName, { sessionManager });
     }
   );
 
@@ -95,9 +107,13 @@ export async function startServer(
     await fastify.listen({ port: config.port, host: config.host });
     log.info({ port: config.port, host: config.host }, 'relay service started');
     console.log(`Relay service listening on http://${config.host}:${config.port}`);
-    console.log(`  - Paircoded WebSocket: ws://${config.host}:${config.port}/ws/session/:sessionId`);
-    console.log(`  - Browser WebSocket:   ws://${config.host}:${config.port}/ws/terminal/:sessionId`);
-    console.log(`  - Health check:        http://${config.host}:${config.port}/api/health`);
+    console.log(`\nWebSocket endpoints:`);
+    console.log(`  - Control:       ws://${config.host}:${config.port}/ws/control/:sessionId`);
+    console.log(`  - Terminal Data: ws://${config.host}:${config.port}/ws/terminal-data/:sessionId/:terminalName`);
+    console.log(`  - Browser:       ws://${config.host}:${config.port}/ws/terminal/:sessionId`);
+    console.log(`\nHTTP endpoints:`);
+    console.log(`  - Health:        http://${config.host}:${config.port}/api/health`);
+    console.log(`  - Terminal page: http://${config.host}:${config.port}/terminal/:sessionId`);
   } catch (error) {
     log.error({ error }, 'failed to start server');
     throw error;

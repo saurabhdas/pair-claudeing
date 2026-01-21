@@ -3,21 +3,30 @@
 //! Unlike ttyd (which hosts a websocket server for incoming connections), paircoded
 //! makes **outgoing** websocket connections to a relay, acting as a bridge between
 //! a local PTY and the relay service.
+//!
+//! ## Architecture
+//!
+//! 1. Paircoded connects to the relay's control endpoint (no PTY spawned yet)
+//! 2. When a browser requests a new terminal, the relay sends `start_terminal`
+//! 3. Paircoded spawns a PTY and opens a data websocket for that terminal
+//! 4. Multiple terminals can be active simultaneously, each with their own PTY
 
 mod bridge;
 mod config;
+mod control;
 mod protocol;
 mod pty;
 mod relay;
+mod terminal_manager;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::config::{Args, Config};
-use crate::protocol::HandshakeMessage;
-use crate::pty::{AsyncPty, PtyHandle, DEFAULT_COLS, DEFAULT_ROWS};
+use crate::control::{ControlConnection, ControlEvent};
+use crate::terminal_manager::{TerminalEvent, TerminalManager};
 
 fn setup_logging(verbose: bool) {
     let filter = if verbose {
@@ -42,48 +51,112 @@ async fn main() -> Result<()> {
     info!(
         relay_url = %config.relay_url,
         shell = %config.shell,
-        "starting paircoded"
+        "starting paircoded (control-connection mode)"
     );
 
-    // Spawn the PTY
+    // Get shell command and args
     let (shell, shell_args) = config.spawn_command();
-    let pty_handle = PtyHandle::spawn(shell, &shell_args)?;
-    let pty = AsyncPty::new(pty_handle)?;
+    let shell_args: Vec<String> = shell_args.iter().map(|s| s.to_string()).collect();
 
-    // Build handshake message
-    let handshake = HandshakeMessage {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        shell: config.shell.clone(),
-        cols: Some(DEFAULT_COLS),
-        rows: Some(DEFAULT_ROWS),
-    };
+    // Create terminal manager
+    let (terminal_manager, mut terminal_event_rx) = TerminalManager::new(
+        config.relay_url.clone(),
+        shell.to_string(),
+        shell_args,
+    );
+
+    // Connect to control endpoint
+    let (control_conn, mut control_event_rx) = ControlConnection::connect(
+        &config.relay_url,
+        env!("CARGO_PKG_VERSION").to_string(),
+    )
+    .await?;
+
+    info!("connected to relay control endpoint, waiting for terminal requests");
 
     // Handle graceful shutdown
     let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
 
-    tokio::select! {
-        result = bridge::run_bridge_loop(
-            pty,
-            &config.relay_url,
-            handshake,
-            config.reconnect,
-            config.max_reconnects,
-        ) => {
-            match result {
-                Ok(exit_code) => {
-                    info!(exit_code, "exiting");
-                    std::process::exit(exit_code);
-                }
-                Err(e) => {
-                    error!(error = %e, "fatal error");
-                    std::process::exit(1);
+    loop {
+        tokio::select! {
+            // Handle control events from relay
+            event = control_event_rx.recv() => {
+                match event {
+                    Some(ControlEvent::StartTerminal { name, cols, rows, request_id }) => {
+                        match terminal_manager.start_terminal(name.clone(), cols, rows).await {
+                            Ok(()) => {
+                                let _ = control_conn.terminal_started(
+                                    name,
+                                    request_id,
+                                    true,
+                                    None,
+                                ).await;
+                            }
+                            Err(e) => {
+                                error!(error = %e, name = %name, "failed to start terminal");
+                                let _ = control_conn.terminal_started(
+                                    name,
+                                    request_id,
+                                    false,
+                                    Some(e.to_string()),
+                                ).await;
+                            }
+                        }
+                    }
+
+                    Some(ControlEvent::CloseTerminal { name, signal }) => {
+                        if let Err(e) = terminal_manager.close_terminal(&name, signal).await {
+                            warn!(error = %e, name = %name, "failed to close terminal");
+                        }
+                    }
+
+                    Some(ControlEvent::Disconnected) => {
+                        warn!("control connection lost");
+                        if config.reconnect {
+                            // TODO: Implement reconnection logic
+                            info!("reconnection not yet implemented, exiting");
+                        }
+                        break;
+                    }
+
+                    None => {
+                        warn!("control event channel closed");
+                        break;
+                    }
                 }
             }
-        }
 
-        _ = shutdown => {
-            info!("received shutdown signal");
-            std::process::exit(0);
+            // Handle terminal events
+            event = terminal_event_rx.recv() => {
+                match event {
+                    Some(TerminalEvent::Exited { name, exit_code }) => {
+                        info!(name = %name, exit_code, "terminal exited");
+                        let _ = control_conn.terminal_closed(name.clone(), exit_code).await;
+                        terminal_manager.remove_terminal(&name).await;
+                    }
+
+                    Some(TerminalEvent::Disconnected { name }) => {
+                        warn!(name = %name, "terminal data connection lost");
+                        let _ = control_conn.terminal_closed(name.clone(), 1).await;
+                        terminal_manager.remove_terminal(&name).await;
+                    }
+
+                    None => {
+                        // Terminal event channel closed - shouldn't happen
+                        warn!("terminal event channel closed");
+                    }
+                }
+            }
+
+            // Handle shutdown signal
+            _ = &mut shutdown => {
+                info!("received shutdown signal");
+                break;
+            }
         }
     }
+
+    info!("paircoded exiting");
+    std::process::exit(0);
 }

@@ -61,4 +61,74 @@ export interface ParsedExitMessage {
 
 export type ParsedClientMessage = ParsedOutputMessage | ParsedHandshakeMessage | ParsedExitMessage;
 
+// ============================================================================
+// Control Protocol Types (JSON over control websocket)
+// ============================================================================
+
+/**
+ * Control messages sent to paircoded on the control connection.
+ */
+export interface StartTerminalMessage {
+  type: 'start_terminal';
+  name: string;
+  cols: number;
+  rows: number;
+  requestId: string;
+}
+
+export interface CloseTerminalMessage {
+  type: 'close_terminal';
+  name: string;
+  signal?: number;
+}
+
+export type ControlMessage = StartTerminalMessage | CloseTerminalMessage;
+
+/**
+ * Control responses received from paircoded on the control connection.
+ */
+export interface ControlHandshakeResponse {
+  type: 'control_handshake';
+  version: string;
+}
+
+export interface TerminalStartedResponse {
+  type: 'terminal_started';
+  name: string;
+  requestId: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface TerminalClosedResponse {
+  type: 'terminal_closed';
+  name: string;
+  exitCode: number;
+}
+
+export type ControlResponse = ControlHandshakeResponse | TerminalStartedResponse | TerminalClosedResponse;
+
+/**
+ * Browser setup messages (browser -> relay).
+ */
+export interface BrowserSetupMessage {
+  type: 'setup';
+  action: 'new' | 'mirror';
+  name: string;
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * Setup response sent to browser after setup is processed.
+ */
+export interface SetupResponse {
+  type: 'setup_response';
+  success: boolean;
+  name: string;
+  cols: number;
+  rows: number;
+  error?: string;
+}
+
 export * from './messages.js';

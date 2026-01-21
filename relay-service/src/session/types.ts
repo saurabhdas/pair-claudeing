@@ -5,12 +5,39 @@
 import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
 
+// HandshakeMessage is used by Terminal interface
+
 export enum SessionState {
-  PENDING = 'PENDING',     // Created, waiting for paircoded connection
-  READY = 'READY',         // paircoded connected, waiting for browser
-  ACTIVE = 'ACTIVE',       // Both paircoded and browser connected
+  PENDING = 'PENDING',     // Created, waiting for paircoded control connection
+  READY = 'READY',         // paircoded control connected, can accept terminal requests
+  ACTIVE = 'ACTIVE',       // Has at least one active terminal
   CLOSING = 'CLOSING',     // Closing in progress
   CLOSED = 'CLOSED',       // Session ended
+}
+
+/**
+ * Represents a single terminal instance within a session.
+ */
+export interface Terminal {
+  name: string;
+  dataWs: WebSocket | null;
+  cols: number;
+  rows: number;
+  interactiveClients: Set<WebSocket>;
+  mirrorClients: Set<WebSocket>;
+  handshake: HandshakeMessage | null;
+}
+
+/**
+ * Pending terminal request waiting for paircoded to start the terminal.
+ */
+export interface PendingTerminalRequest {
+  name: string;
+  cols: number;
+  rows: number;
+  requestId: string;
+  browserWs: WebSocket;
+  createdAt: number;
 }
 
 export interface SessionData {
@@ -18,14 +45,15 @@ export interface SessionData {
   state: SessionState;
   createdAt: Date;
 
-  // Paircoded connection
-  paircodedWs: WebSocket | null;
-  handshake: HandshakeMessage | null;
+  // Control connection from paircoded
+  controlWs: WebSocket | null;
+  controlHandshake: { version: string } | null;
 
-  // Browser connections (can have multiple viewers)
-  browserConnections: Set<WebSocket>;
+  // Named terminals
+  terminals: Map<string, Terminal>;
+  pendingTerminalRequests: Map<string, PendingTerminalRequest>;
 
-  // Terminal dimensions
+  // Default terminal dimensions
   cols: number;
   rows: number;
 
@@ -33,12 +61,21 @@ export interface SessionData {
   reconnectTimer: NodeJS.Timeout | null;
 }
 
+export interface TerminalInfo {
+  name: string;
+  cols: number;
+  rows: number;
+  interactiveCount: number;
+  mirrorCount: number;
+  hasDataConnection: boolean;
+}
+
 export interface SessionInfo {
   id: string;
   state: SessionState;
   createdAt: string;
-  handshake: HandshakeMessage | null;
-  browserCount: number;
+  controlHandshake: { version: string } | null;
   cols: number;
   rows: number;
+  terminals: TerminalInfo[];
 }

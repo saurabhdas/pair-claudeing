@@ -1,6 +1,11 @@
 /**
  * Terminal client for relay-service.
- * Split view: left terminal (read/write) + right terminal (read-only mirror)
+ * Split view: left terminal (interactive) + right terminal (read-only mirror)
+ *
+ * New Architecture:
+ * - Left panel opens websocket, sends setup {action: 'new', name: 'main'}
+ * - Right panel opens websocket, sends setup {action: 'mirror', name: 'main'}
+ * - Each panel has its own websocket connection
  */
 
 (function() {
@@ -12,6 +17,12 @@
     if (pathMatch) return pathMatch[1];
     const params = new URLSearchParams(window.location.search);
     return params.get('session') || params.get('sessionId');
+  }
+
+  // Get terminal name from query param (default: 'main')
+  function getTerminalName() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('terminal') || params.get('name') || 'main';
   }
 
   // Status indicator
@@ -94,8 +105,10 @@
   const rightContainer = document.getElementById('terminal-right');
   const { term: termRight, fitAddon: fitRight } = createTerminal(rightContainer, true);
 
-  // Get session ID
+  // Get session ID and terminal name
   const sessionId = getSessionId();
+  const terminalName = getTerminalName();
+
   if (!sessionId) {
     setStatus('error', 'No session ID');
     termLeft.writeln('\r\n\x1b[31mError: No session ID provided.\x1b[0m');
@@ -105,90 +118,119 @@
     return;
   }
 
-  // Connect to WebSocket
+  // WebSocket URL
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}`;
 
-  let ws = null;
+  // Connection state
+  let wsLeft = null;      // Interactive connection (left panel)
+  let wsRight = null;     // Mirror connection (right panel)
   let reconnectAttempts = 0;
   const maxReconnectAttempts = 5;
+  let setupComplete = false;
 
   const textDecoder = new TextDecoder('utf-8', { fatal: false });
 
-  function connect() {
-    setStatus('connecting', 'Connecting...');
-    ws = new WebSocket(wsUrl);
+  /**
+   * Create a websocket connection for a terminal panel.
+   * @param {string} action - 'new' for interactive, 'mirror' for read-only
+   * @param {Terminal} term - The xterm.js terminal instance
+   * @param {FitAddon} fitAddon - The fit addon for this terminal
+   * @param {boolean} isInteractive - Whether this connection can send input
+   */
+  function createConnection(action, term, fitAddon, isInteractive) {
+    const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = function() {
-      setStatus('connected', 'Connected');
-      reconnectAttempts = 0;
-      sendResize();
+      // Send setup message
+      const dims = fitAddon.proposeDimensions();
+      const setupMsg = {
+        type: 'setup',
+        action: action,
+        name: terminalName,
+        cols: dims ? dims.cols : 80,
+        rows: dims ? dims.rows : 24,
+      };
+      ws.send(JSON.stringify(setupMsg));
+      console.log(`Sent setup (${action}):`, setupMsg);
     };
 
     ws.onmessage = function(event) {
       if (event.data instanceof ArrayBuffer) {
         // Binary data - terminal output
         const text = textDecoder.decode(event.data, { stream: true });
-        // Write to BOTH terminals
-        termLeft.write(text);
-        termRight.write(text);
+        term.write(text);
       } else if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
-          handleJsonMessage(msg);
+          handleJsonMessage(msg, term, isInteractive);
         } catch {
-          // Plain text - write to both terminals
-          termLeft.write(event.data);
-          termRight.write(event.data);
+          // Plain text - write to terminal
+          term.write(event.data);
         }
       }
     };
 
     ws.onclose = function(event) {
-      setStatus('disconnected', 'Disconnected');
+      console.log(`WebSocket closed (${action}):`, event.code, event.reason);
 
-      if (event.code === 4404) {
-        termLeft.writeln('\r\n\x1b[31mSession not found.\x1b[0m');
-        return;
-      }
-      if (event.code === 4400) {
-        termLeft.writeln('\r\n\x1b[33mSession not ready. Waiting for paircoded to connect...\x1b[0m');
-      }
-
-      if (reconnectAttempts < maxReconnectAttempts) {
-        reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
-        setStatus('connecting', `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
-        setTimeout(connect, delay);
-      } else {
-        termLeft.writeln('\r\n\x1b[31mConnection lost. Refresh to retry.\x1b[0m');
+      if (isInteractive) {
+        handleInteractiveClose(event, term);
       }
     };
 
-    ws.onerror = function() {
-      setStatus('error', 'Connection error');
+    ws.onerror = function(error) {
+      console.error(`WebSocket error (${action}):`, error);
+      if (isInteractive) {
+        setStatus('error', 'Connection error');
+      }
     };
+
+    return ws;
   }
 
-  function handleJsonMessage(msg) {
+  function handleJsonMessage(msg, term, isInteractive) {
     switch (msg.type) {
+      case 'setup_response':
+        console.log('Setup response:', msg);
+        if (msg.success) {
+          if (isInteractive) {
+            setStatus('connected', 'Connected');
+            setupComplete = true;
+            reconnectAttempts = 0;
+            // Now connect the mirror
+            if (!wsRight) {
+              wsRight = createConnection('mirror', termRight, fitRight, false);
+            }
+          }
+        } else {
+          term.writeln(`\r\n\x1b[31mSetup failed: ${msg.error || 'Unknown error'}\x1b[0m`);
+          if (isInteractive) {
+            setStatus('error', 'Setup failed');
+          }
+        }
+        break;
+
       case 'session':
-        console.log('Session info:', msg);
-        fitLeft.fit();
-        fitRight.fit();
-        sendResize();
+        // Legacy session info message
+        console.log('Session info (legacy):', msg);
+        if (isInteractive) {
+          setStatus('connected', 'Connected');
+          setupComplete = true;
+          reconnectAttempts = 0;
+        }
         break;
 
       case 'exit':
-        termLeft.writeln(`\r\n\x1b[33mProcess exited with code ${msg.code}\x1b[0m`);
-        termRight.writeln(`\r\n\x1b[33mProcess exited with code ${msg.code}\x1b[0m`);
-        setStatus('disconnected', 'Exited');
+        term.writeln(`\r\n\x1b[33mProcess exited with code ${msg.code}\x1b[0m`);
+        if (isInteractive) {
+          setStatus('disconnected', 'Exited');
+        }
         break;
 
       case 'disconnect':
-        termLeft.writeln(`\r\n\x1b[31mDisconnected: ${msg.reason}\x1b[0m`);
-        termRight.writeln(`\r\n\x1b[31mDisconnected: ${msg.reason}\x1b[0m`);
+        term.writeln(`\r\n\x1b[31mDisconnected: ${msg.reason}\x1b[0m`);
         break;
 
       default:
@@ -196,12 +238,54 @@
     }
   }
 
+  function handleInteractiveClose(event, term) {
+    setStatus('disconnected', 'Disconnected');
+
+    if (event.code === 4404) {
+      term.writeln('\r\n\x1b[31mSession not found.\x1b[0m');
+      return;
+    }
+    if (event.code === 4400) {
+      term.writeln('\r\n\x1b[33mSession not ready. Waiting for paircoded to connect...\x1b[0m');
+    }
+    if (event.code === 4408) {
+      term.writeln('\r\n\x1b[31mSetup timeout.\x1b[0m');
+    }
+
+    if (reconnectAttempts < maxReconnectAttempts) {
+      reconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
+      setStatus('connecting', `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
+      setTimeout(connect, delay);
+    } else {
+      term.writeln('\r\n\x1b[31mConnection lost. Refresh to retry.\x1b[0m');
+    }
+  }
+
+  function connect() {
+    setStatus('connecting', 'Connecting...');
+
+    // Close existing connections
+    if (wsLeft) {
+      wsLeft.close();
+      wsLeft = null;
+    }
+    if (wsRight) {
+      wsRight.close();
+      wsRight = null;
+    }
+
+    setupComplete = false;
+
+    // Start with interactive connection (left panel)
+    wsLeft = createConnection('new', termLeft, fitLeft, true);
+  }
+
   function sendResize() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      // Use left terminal dimensions (it's the primary)
+    if (wsLeft && wsLeft.readyState === WebSocket.OPEN && setupComplete) {
       const dims = fitLeft.proposeDimensions();
       if (dims) {
-        ws.send(JSON.stringify({
+        wsLeft.send(JSON.stringify({
           type: 'resize',
           cols: dims.cols,
           rows: dims.rows,
@@ -216,14 +300,14 @@
 
   // Handle terminal input - only from LEFT terminal
   termLeft.onData(function(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
+    if (wsLeft && wsLeft.readyState === WebSocket.OPEN && setupComplete) {
+      wsLeft.send(JSON.stringify({ type: 'input', data: data }));
     }
   });
 
   termLeft.onBinary(function(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: data }));
+    if (wsLeft && wsLeft.readyState === WebSocket.OPEN && setupComplete) {
+      wsLeft.send(JSON.stringify({ type: 'input', data: data }));
     }
   });
 

@@ -1,0 +1,235 @@
+//! Control connection handler for managing terminal lifecycle.
+//!
+//! The control connection is a JSON-based websocket that receives commands
+//! from the relay to start/stop terminals.
+
+use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{debug, error, info, warn};
+use url::Url;
+
+use crate::protocol::{ControlMessage, ControlResponse};
+
+/// Events sent from the control connection to the main loop
+#[derive(Debug)]
+pub enum ControlEvent {
+    /// Request to start a new terminal
+    StartTerminal {
+        name: String,
+        cols: u16,
+        rows: u16,
+        request_id: String,
+    },
+    /// Request to close a terminal
+    CloseTerminal {
+        name: String,
+        signal: Option<i32>,
+    },
+    /// Control connection closed
+    Disconnected,
+}
+
+/// Commands sent to the control connection
+#[derive(Debug)]
+pub enum ControlCommand {
+    /// Send a terminal_started response
+    TerminalStarted {
+        name: String,
+        request_id: String,
+        success: bool,
+        error: Option<String>,
+    },
+    /// Send a terminal_closed notification
+    TerminalClosed {
+        name: String,
+        exit_code: i32,
+    },
+}
+
+/// Handle to the control connection
+pub struct ControlConnection {
+    /// Channel to send commands to the control connection
+    command_tx: mpsc::Sender<ControlCommand>,
+}
+
+impl ControlConnection {
+    /// Connect to the relay's control endpoint and start the control loop
+    pub async fn connect(
+        url: &Url,
+        version: String,
+    ) -> Result<(Self, mpsc::Receiver<ControlEvent>)> {
+        info!(url = %url, "connecting to control endpoint");
+
+        let (ws_stream, response) = connect_async(url.as_str())
+            .await
+            .context("failed to connect to control endpoint")?;
+
+        info!(status = %response.status(), "connected to control endpoint");
+        debug!(headers = ?response.headers(), "control connection response headers");
+
+        let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+        // Channels for communication
+        let (event_tx, event_rx) = mpsc::channel::<ControlEvent>(64);
+        let (command_tx, mut command_rx) = mpsc::channel::<ControlCommand>(64);
+
+        // Send initial handshake
+        let handshake = ControlResponse::ControlHandshake { version };
+        let handshake_json = handshake.encode()?;
+        ws_sink
+            .send(Message::Text(handshake_json))
+            .await
+            .context("failed to send control handshake")?;
+        info!("sent control handshake");
+
+        // Spawn task to handle control connection
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    // Handle incoming messages from relay
+                    msg = ws_stream.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                match ControlMessage::parse_str(&text) {
+                                    Ok(control_msg) => {
+                                        let event = match control_msg {
+                                            ControlMessage::StartTerminal { name, cols, rows, request_id } => {
+                                                info!(name = %name, cols, rows, request_id = %request_id, "received start_terminal");
+                                                ControlEvent::StartTerminal { name, cols, rows, request_id }
+                                            }
+                                            ControlMessage::CloseTerminal { name, signal } => {
+                                                info!(name = %name, signal = ?signal, "received close_terminal");
+                                                ControlEvent::CloseTerminal { name, signal }
+                                            }
+                                        };
+                                        if event_tx.send(event).await.is_err() {
+                                            debug!("event receiver dropped");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to parse control message");
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Binary(data))) => {
+                                match ControlMessage::parse(&data) {
+                                    Ok(control_msg) => {
+                                        let event = match control_msg {
+                                            ControlMessage::StartTerminal { name, cols, rows, request_id } => {
+                                                info!(name = %name, cols, rows, request_id = %request_id, "received start_terminal");
+                                                ControlEvent::StartTerminal { name, cols, rows, request_id }
+                                            }
+                                            ControlMessage::CloseTerminal { name, signal } => {
+                                                info!(name = %name, signal = ?signal, "received close_terminal");
+                                                ControlEvent::CloseTerminal { name, signal }
+                                            }
+                                        };
+                                        if event_tx.send(event).await.is_err() {
+                                            debug!("event receiver dropped");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to parse binary control message");
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Ping(_))) => {
+                                debug!("received ping from control connection");
+                            }
+                            Some(Ok(Message::Pong(_))) => {
+                                debug!("received pong from control connection");
+                            }
+                            Some(Ok(Message::Close(frame))) => {
+                                info!(frame = ?frame, "control connection closed by relay");
+                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                break;
+                            }
+                            Some(Ok(Message::Frame(_))) => {
+                                // Raw frame, ignore
+                            }
+                            Some(Err(e)) => {
+                                error!(error = %e, "control connection error");
+                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                break;
+                            }
+                            None => {
+                                info!("control connection stream ended");
+                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Handle outgoing commands
+                    cmd = command_rx.recv() => {
+                        match cmd {
+                            Some(command) => {
+                                let response = match command {
+                                    ControlCommand::TerminalStarted { name, request_id, success, error } => {
+                                        ControlResponse::TerminalStarted { name, request_id, success, error }
+                                    }
+                                    ControlCommand::TerminalClosed { name, exit_code } => {
+                                        ControlResponse::TerminalClosed { name, exit_code }
+                                    }
+                                };
+                                match response.encode() {
+                                    Ok(json) => {
+                                        if let Err(e) = ws_sink.send(Message::Text(json)).await {
+                                            error!(error = %e, "failed to send control response");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "failed to encode control response");
+                                    }
+                                }
+                            }
+                            None => {
+                                debug!("command channel closed");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            debug!("control connection task finished");
+        });
+
+        Ok((
+            ControlConnection { command_tx },
+            event_rx,
+        ))
+    }
+
+    /// Send a terminal_started response
+    pub async fn terminal_started(
+        &self,
+        name: String,
+        request_id: String,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        self.command_tx
+            .send(ControlCommand::TerminalStarted {
+                name,
+                request_id,
+                success,
+                error,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("control connection closed"))
+    }
+
+    /// Send a terminal_closed notification
+    pub async fn terminal_closed(&self, name: String, exit_code: i32) -> Result<()> {
+        self.command_tx
+            .send(ControlCommand::TerminalClosed { name, exit_code })
+            .await
+            .map_err(|_| anyhow::anyhow!("control connection closed"))
+    }
+}

@@ -27,10 +27,6 @@ pub struct Args {
     /// Disable automatic reconnection on disconnect
     #[arg(long)]
     pub no_reconnect: bool,
-
-    /// Maximum reconnection attempts (0 for unlimited)
-    #[arg(long, default_value = "0")]
-    pub max_reconnects: u32,
 }
 
 /// Runtime configuration derived from CLI args and environment
@@ -50,9 +46,6 @@ pub struct Config {
 
     /// Auto-reconnect on disconnect
     pub reconnect: bool,
-
-    /// Maximum reconnection attempts
-    pub max_reconnects: u32,
 }
 
 impl Config {
@@ -82,7 +75,6 @@ impl Config {
             command: args.command,
             verbose: args.verbose,
             reconnect: !args.no_reconnect,
-            max_reconnects: args.max_reconnects,
         })
     }
 
@@ -110,7 +102,6 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
-            max_reconnects: 0,
         };
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.relay_url.scheme(), "ws");
@@ -124,7 +115,6 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
-            max_reconnects: 0,
         };
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.relay_url.scheme(), "wss");
@@ -138,7 +128,6 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
-            max_reconnects: 0,
         };
         let result = Config::from_args(args);
         assert!(result.is_err());
@@ -152,7 +141,6 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
-            max_reconnects: 0,
         };
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.shell, "/bin/zsh");
