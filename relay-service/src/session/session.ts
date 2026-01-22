@@ -301,7 +301,7 @@ export class Session implements SessionData {
    */
   addPendingRequest(request: PendingTerminalRequest): void {
     this.pendingTerminalRequests.set(request.requestId, request);
-    log.debug({ sessionId: this.id, requestId: request.requestId, terminalName: request.name }, 'pending request added');
+    log.debug({ sessionId: this.id, requestId: request.requestId }, 'pending request added');
   }
 
   /**
@@ -355,6 +355,7 @@ export class Session implements SessionData {
       createdAt: this.createdAt.toISOString(),
       owner: this.owner,
       controlHandshake: this.controlHandshake,
+      controlConnected: this.hasControl(),
       cols: this.cols,
       rows: this.rows,
       terminals: terminalInfos,

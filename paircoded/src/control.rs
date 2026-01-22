@@ -18,6 +18,7 @@ use crate::protocol::{ControlMessage, ControlResponse};
 pub enum ControlEvent {
     /// Request to start a new terminal
     StartTerminal {
+        #[allow(dead_code)] // Name is sent by relay but we use PID as terminal name now
         name: String,
         cols: u16,
         rows: u16,
@@ -29,7 +30,12 @@ pub enum ControlEvent {
         signal: Option<i32>,
     },
     /// Control connection closed
-    Disconnected,
+    Disconnected {
+        /// WebSocket close code if available
+        close_code: Option<u16>,
+        /// Whether this was a clean close (close frame received)
+        clean: bool,
+    },
 }
 
 /// Commands sent to the control connection
@@ -47,6 +53,8 @@ pub enum ControlCommand {
         name: String,
         exit_code: i32,
     },
+    /// Gracefully close the connection
+    Shutdown,
 }
 
 /// Handle to the control connection
@@ -109,7 +117,7 @@ impl ControlConnection {
             .send(Message::Text(handshake_json))
             .await
             .context("failed to send control handshake")?;
-        info!("sent control handshake");
+        info!("Connected to relay");
 
         // Spawn task to handle control connection
         tokio::spawn(async move {
@@ -171,8 +179,12 @@ impl ControlConnection {
                                 debug!("received pong from control connection");
                             }
                             Some(Ok(Message::Close(frame))) => {
+                                let close_code = frame.as_ref().map(|f| f.code.into());
                                 info!(frame = ?frame, "control connection closed by relay");
-                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                let _ = event_tx.send(ControlEvent::Disconnected {
+                                    close_code,
+                                    clean: true,
+                                }).await;
                                 break;
                             }
                             Some(Ok(Message::Frame(_))) => {
@@ -180,12 +192,18 @@ impl ControlConnection {
                             }
                             Some(Err(e)) => {
                                 error!(error = %e, "control connection error");
-                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                let _ = event_tx.send(ControlEvent::Disconnected {
+                                    close_code: None,
+                                    clean: false,
+                                }).await;
                                 break;
                             }
                             None => {
                                 info!("control connection stream ended");
-                                let _ = event_tx.send(ControlEvent::Disconnected).await;
+                                let _ = event_tx.send(ControlEvent::Disconnected {
+                                    close_code: None,
+                                    clean: false,
+                                }).await;
                                 break;
                             }
                         }
@@ -194,6 +212,15 @@ impl ControlConnection {
                     // Handle outgoing commands
                     cmd = command_rx.recv() => {
                         match cmd {
+                            Some(ControlCommand::Shutdown) => {
+                                info!("sending graceful shutdown close frame");
+                                let close_frame = tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                                    reason: "client shutdown".into(),
+                                };
+                                let _ = ws_sink.send(Message::Close(Some(close_frame))).await;
+                                break;
+                            }
                             Some(command) => {
                                 let response = match command {
                                     ControlCommand::TerminalStarted { name, request_id, success, error } => {
@@ -202,6 +229,7 @@ impl ControlConnection {
                                     ControlCommand::TerminalClosed { name, exit_code } => {
                                         ControlResponse::TerminalClosed { name, exit_code }
                                     }
+                                    ControlCommand::Shutdown => unreachable!(),
                                 };
                                 match response.encode() {
                                     Ok(json) => {
@@ -258,6 +286,11 @@ impl ControlConnection {
             .send(ControlCommand::TerminalClosed { name, exit_code })
             .await
             .map_err(|_| anyhow::anyhow!("control connection closed"))
+    }
+
+    /// Gracefully shutdown the control connection
+    pub async fn shutdown(&self) {
+        let _ = self.command_tx.send(ControlCommand::Shutdown).await;
     }
 }
 

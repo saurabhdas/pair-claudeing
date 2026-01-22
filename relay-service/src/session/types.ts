@@ -43,12 +43,13 @@ export interface Terminal {
  * Pending terminal request waiting for paircoded to start the terminal.
  */
 export interface PendingTerminalRequest {
-  name: string;
   cols: number;
   rows: number;
   requestId: string;
   browserWs: WebSocket;
   createdAt: number;
+  /** Callback to set the actual terminal name once paircoded responds */
+  onTerminalNameAssigned?: (name: string) => void;
 }
 
 /**
@@ -105,6 +106,7 @@ export interface SessionInfo {
   createdAt: string;
   owner: SessionOwner | null;
   controlHandshake: ControlHandshakeInfo | null;
+  controlConnected: boolean;
   cols: number;
   rows: number;
   terminals: TerminalInfo[];

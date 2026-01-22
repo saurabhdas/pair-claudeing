@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex, oneshot};
+use tokio::sync::{mpsc, Mutex, RwLock, oneshot};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -16,6 +16,9 @@ use crate::bridge::Bridge;
 use crate::protocol::HandshakeMessage;
 use crate::pty::{AsyncPty, PtyHandle};
 use crate::relay::RelayConnection;
+
+/// Shared JWT token that can be updated when refreshed
+pub type SharedToken = Arc<RwLock<String>>;
 
 /// Event from a terminal to the manager
 #[derive(Debug)]
@@ -32,7 +35,9 @@ struct Terminal {
     #[allow(dead_code)]
     name: String,
     /// Handle to send shutdown signal
-    shutdown_tx: oneshot::Sender<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Handle to wait for task completion
+    join_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Manages multiple named terminals
@@ -49,6 +54,10 @@ pub struct TerminalManager {
     shell_args: Vec<String>,
     /// Working directory for spawned terminals
     working_dir: PathBuf,
+    /// Shared JWT token for authentication
+    shared_token: SharedToken,
+    /// Whether to sandbox terminals with bubblewrap (Linux only)
+    sandboxed: bool,
 }
 
 impl TerminalManager {
@@ -58,6 +67,8 @@ impl TerminalManager {
         shell: String,
         shell_args: Vec<String>,
         working_dir: PathBuf,
+        shared_token: SharedToken,
+        sandboxed: bool,
     ) -> (Self, mpsc::Receiver<TerminalEvent>) {
         let (event_tx, event_rx) = mpsc::channel(64);
 
@@ -69,21 +80,33 @@ impl TerminalManager {
                 shell,
                 shell_args,
                 working_dir,
+                shared_token,
+                sandboxed,
             },
             event_rx,
         )
     }
 
-    /// Start a new terminal with the given name and dimensions
+    /// Start a new terminal with the given dimensions.
+    /// Returns the terminal name (which is the PID of the spawned process).
     pub async fn start_terminal(
         &self,
-        name: String,
         cols: u16,
         rows: u16,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        // Spawn the PTY first to get the PID
+        let shell_args: Vec<&str> = self.shell_args.iter().map(|s| s.as_str()).collect();
+        let pty_handle = PtyHandle::spawn(&self.shell, &shell_args, &self.working_dir, self.sandboxed)
+            .context("failed to spawn PTY")?;
+
+        // Use the PID as the terminal name
+        let pid = pty_handle.process_id()
+            .ok_or_else(|| anyhow!("failed to get process ID from PTY"))?;
+        let name = pid.to_string();
+
         let mut terminals = self.terminals.lock().await;
 
-        // Check if terminal already exists
+        // Check if terminal already exists (shouldn't happen with PIDs, but just in case)
         if terminals.contains_key(&name) {
             return Err(anyhow!("terminal '{}' already exists", name));
         }
@@ -95,11 +118,6 @@ impl TerminalManager {
             .unwrap_or("unknown");
 
         let data_url = self.build_data_url(session_id, &name)?;
-
-        // Spawn the PTY
-        let shell_args: Vec<&str> = self.shell_args.iter().map(|s| s.as_str()).collect();
-        let pty_handle = PtyHandle::spawn(&self.shell, &shell_args, &self.working_dir)
-            .context("failed to spawn PTY")?;
 
         // Resize to requested dimensions
         pty_handle.resize(cols, rows)?;
@@ -117,20 +135,12 @@ impl TerminalManager {
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        // Store terminal
-        terminals.insert(
-            name.clone(),
-            Terminal {
-                name: name.clone(),
-                shutdown_tx,
-            },
-        );
-
         // Spawn terminal task
         let event_tx = self.event_tx.clone();
         let terminal_name = name.clone();
+        let shared_token = self.shared_token.clone();
 
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let result = run_terminal_task(
                 terminal_name.clone(),
                 pty,
@@ -139,6 +149,7 @@ impl TerminalManager {
                 shutdown_rx,
                 cols,
                 rows,
+                shared_token,
             )
             .await;
 
@@ -162,22 +173,61 @@ impl TerminalManager {
             }
         });
 
-        info!(name = %name, cols, rows, "started terminal");
-        Ok(())
+        // Store terminal
+        terminals.insert(
+            name.clone(),
+            Terminal {
+                name: name.clone(),
+                shutdown_tx: Some(shutdown_tx),
+                join_handle,
+            },
+        );
+
+        info!(pid, "New terminal opened (PID {})", pid);
+        Ok(name)
     }
 
     /// Close a terminal by name
     pub async fn close_terminal(&self, name: &str, signal: Option<i32>) -> Result<()> {
         let mut terminals = self.terminals.lock().await;
 
-        if let Some(terminal) = terminals.remove(name) {
+        if let Some(mut terminal) = terminals.remove(name) {
             // Send shutdown signal (the receiver may be dropped if already exited)
-            let _ = terminal.shutdown_tx.send(());
+            if let Some(tx) = terminal.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
             info!(name = %name, signal = ?signal, "closing terminal");
             Ok(())
         } else {
             Err(anyhow!("terminal '{}' not found", name))
         }
+    }
+
+    /// Gracefully shutdown all terminals, waiting for them to close
+    pub async fn shutdown_all(&self) {
+        let mut terminals = self.terminals.lock().await;
+
+        // Send shutdown signal to all terminals
+        for (name, terminal) in terminals.iter_mut() {
+            if let Some(tx) = terminal.shutdown_tx.take() {
+                info!(name = %name, "sending shutdown signal to terminal");
+                let _ = tx.send(());
+            }
+        }
+
+        // Collect all join handles
+        let handles: Vec<_> = terminals.drain().map(|(_, t)| t.join_handle).collect();
+        drop(terminals); // Release the lock before awaiting
+
+        // Wait for all tasks to complete (with timeout)
+        for handle in handles {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                handle,
+            ).await;
+        }
+
+        info!("all terminals shut down");
     }
 
     /// Remove a terminal from tracking (called after exit event)
@@ -204,16 +254,20 @@ async fn run_terminal_task(
     mut shutdown_rx: oneshot::Receiver<()>,
     cols: u16,
     rows: u16,
+    shared_token: SharedToken,
 ) -> Result<i32> {
     let mut bridge = Bridge::new(pty, cols, rows).await?;
     let mut reconnect_delay = Duration::from_secs(1);
     let max_reconnect_delay = Duration::from_secs(30);
 
     loop {
+        // Get the current token for this connection attempt
+        let token = shared_token.read().await.clone();
+
         // Connect to data websocket
         info!(terminal = %name, url = %data_url, "connecting to data websocket");
 
-        match RelayConnection::connect(&data_url, handshake.clone()).await {
+        match RelayConnection::connect(&data_url, handshake.clone(), Some(&token)).await {
             Ok(conn) => {
                 reconnect_delay = Duration::from_secs(1); // Reset on successful connection
                 let (tx, rx) = conn.into_receiver();

@@ -173,20 +173,23 @@ function handleSetupMessage(
     // Request paircoded to start new terminal
     const requestId = uuidv4();
 
-    // Store pending request
+    // Store pending request with callback to update state when we get the actual terminal name (PID)
     session.addPendingRequest({
-      name,
       cols,
       rows,
       requestId,
       browserWs: ws,
       createdAt: Date.now(),
+      onTerminalNameAssigned: (actualName: string) => {
+        state.terminalName = actualName;
+        state.isSetupComplete = true;
+        log.debug({ sessionId: session.id, actualName }, 'terminal name assigned via callback');
+      },
     });
 
-    state.terminalName = name;
     state.isInteractive = true;
 
-    // Send request to paircoded
+    // Send request to paircoded (name is ignored, PID will be used)
     const sent = requestStartTerminal(session, name, cols, rows, requestId);
     if (!sent) {
       // Control connection not available

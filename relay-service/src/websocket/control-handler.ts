@@ -87,8 +87,9 @@ export function handleControlConnection(
 
   // Handle connection close
   ws.on('close', (code, reason) => {
-    log.info({ sessionId, code, reason: reason.toString() }, 'control connection closed');
-    handleControlDisconnect(session!, sessionManager);
+    const reasonStr = reason.toString();
+    log.info({ sessionId, code, reason: reasonStr }, 'control connection closed');
+    handleControlDisconnect(session!, sessionManager, code, reasonStr);
   });
 
   // Handle errors
@@ -113,7 +114,7 @@ function handleControlMessage(
 
   switch (message.type) {
     case 'control_handshake':
-      handleControlHandshake(session, message);
+      handleControlHandshake(session, message, sessionManager);
       break;
 
     case 'terminal_started':
@@ -128,7 +129,8 @@ function handleControlMessage(
 
 function handleControlHandshake(
   session: import('../session/session.js').Session,
-  message: { type: 'control_handshake'; version: string; hostname?: string; username?: string; workingDir?: string }
+  message: { type: 'control_handshake'; version: string; hostname?: string; username?: string; workingDir?: string },
+  sessionManager: SessionManager
 ): void {
   log.info({ sessionId: session.id, version: message.version, hostname: message.hostname }, 'received control handshake');
   session.setControlHandshake({
@@ -137,6 +139,9 @@ function handleControlHandshake(
     username: message.username,
     workingDir: message.workingDir,
   });
+
+  // Notify that session is now online
+  sessionManager.notifySessionOnline(session.id);
 }
 
 function handleTerminalStarted(
@@ -159,14 +164,19 @@ function handleTerminalStarted(
   }
 
   if (message.success) {
-    // Create the terminal in the session
+    // Create the terminal in the session with the PID-based name from paircoded
     session.createTerminal(message.name, request.cols, request.rows);
+
+    // Update browser's terminal name via callback (so subsequent messages use correct name)
+    if (request.onTerminalNameAssigned) {
+      request.onTerminalNameAssigned(message.name);
+    }
 
     // Add the browser as an interactive client
     // No snapshot needed for first client since terminal is fresh
     session.addInteractiveClient(message.name, request.browserWs, null);
 
-    // Send success response to browser
+    // Send success response to browser with the actual terminal name (PID)
     const response = createSetupResponse(true, message.name, request.cols, request.rows);
     request.browserWs.send(JSON.stringify(response));
   } else {
@@ -214,38 +224,72 @@ function handleTerminalClosed(
 
 function handleControlDisconnect(
   session: import('../session/session.js').Session,
-  sessionManager: SessionManager
+  sessionManager: SessionManager,
+  closeCode: number,
+  closeReason: string
 ): void {
   if (session.state === SessionState.CLOSED || session.state === SessionState.CLOSING) {
     return;
   }
 
-  // Start reconnect timer
-  session.handleControlDisconnect(
-    sessionManager.paircodedReconnectTimeoutMs,
-    () => {
-      // Timeout expired - close session
-      log.info({ sessionId: session.id }, 'control reconnect timeout, closing session');
+  // Check if this was a graceful shutdown (close code 1000 with "client shutdown" reason)
+  const isGracefulShutdown = closeCode === 1000 && closeReason === 'client shutdown';
 
-      // Notify all terminal clients
-      const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'paircoded_timeout' });
-      for (const terminal of session.terminals.values()) {
-        for (const ws of terminal.interactiveClients.keys()) {
-          if (ws.readyState === 1) {
-            ws.send(disconnectMessage);
-          }
-        }
-        for (const ws of terminal.mirrorClients.keys()) {
-          if (ws.readyState === 1) {
-            ws.send(disconnectMessage);
-          }
+  if (isGracefulShutdown) {
+    // Graceful shutdown - immediately close session
+    log.info({ sessionId: session.id }, 'graceful shutdown, closing session immediately');
+
+    // Notify all terminal clients
+    const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'session_ended' });
+    for (const terminal of session.terminals.values()) {
+      for (const ws of terminal.interactiveClients.keys()) {
+        if (ws.readyState === 1) {
+          ws.send(disconnectMessage);
         }
       }
-
-      session.close();
-      sessionManager.deleteSession(session.id);
+      for (const ws of terminal.mirrorClients.keys()) {
+        if (ws.readyState === 1) {
+          ws.send(disconnectMessage);
+        }
+      }
     }
-  );
+
+    session.close();
+    sessionManager.deleteSession(session.id, 'graceful');
+  } else {
+    // Network disconnect - wait for reconnection
+    log.info({ sessionId: session.id, closeCode, closeReason }, 'network disconnect, waiting for reconnection');
+
+    // Notify that session is offline (but not closed yet)
+    sessionManager.notifySessionOffline(session.id);
+
+    // Start reconnect timer
+    session.handleControlDisconnect(
+      sessionManager.paircodedReconnectTimeoutMs,
+      () => {
+        // Timeout expired - close session
+        log.info({ sessionId: session.id }, 'control reconnect timeout, closing session');
+
+        // Notify all terminal clients
+        const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'paircoded_timeout' });
+        for (const terminal of session.terminals.values()) {
+          for (const ws of terminal.interactiveClients.keys()) {
+            if (ws.readyState === 1) {
+              ws.send(disconnectMessage);
+            }
+          }
+          for (const ws of terminal.mirrorClients.keys()) {
+            if (ws.readyState === 1) {
+              ws.send(disconnectMessage);
+            }
+          }
+        }
+
+        session.close();
+        sessionManager.deleteSession(session.id, 'timeout');
+      }
+    );
+  }
 }
 
 /**

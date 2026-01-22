@@ -12,7 +12,7 @@ import { SessionManager } from '../session/index.js';
 import { handleBrowserConnection } from '../websocket/browser-handler.js';
 import { handleControlConnection } from '../websocket/control-handler.js';
 import { handleTerminalDataConnection } from '../websocket/terminal-data-handler.js';
-import { handleJamConnection } from '../websocket/jam-handler.js';
+import { handleJamConnection, setupSessionEventListeners } from '../websocket/jam-handler.js';
 import { registerHttpRoutes } from './http-routes.js';
 import { registerAuthRoutes, getUser } from './auth-routes.js';
 import { registerPeerRoutes } from './peer-routes.js';
@@ -103,6 +103,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
   // Register jam routes
   await registerJamRoutes(fastify, { sessionManager });
+
+  // Set up session event listeners for jam notifications
+  setupSessionEventListeners(sessionManager);
 
   // WebSocket route for paircoded CONTROL connections
   fastify.get<{ Params: { sessionId: string } }>(

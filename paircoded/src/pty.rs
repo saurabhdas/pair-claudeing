@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info};
 
+use crate::sandbox;
+
 /// Default terminal size
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
@@ -26,7 +28,10 @@ pub struct PtyHandle {
 
 impl PtyHandle {
     /// Spawn a new PTY with the given shell command and working directory
-    pub fn spawn(shell: &str, args: &[&str], working_dir: &Path) -> Result<Self> {
+    ///
+    /// If `sandboxed` is true on Linux, the shell will be wrapped with bubblewrap
+    /// to restrict filesystem access to the working directory only.
+    pub fn spawn(shell: &str, args: &[&str], working_dir: &Path, sandboxed: bool) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -38,13 +43,29 @@ impl PtyHandle {
             })
             .context("failed to open PTY")?;
 
-        let mut cmd = CommandBuilder::new(shell);
-        for arg in args {
-            cmd.arg(*arg);
+        // Determine the actual command to run (with or without sandbox)
+        let (actual_cmd, actual_args): (String, Vec<String>) = if sandboxed {
+            sandbox::build_sandbox_args(shell, args, working_dir)?
+        } else {
+            (shell.to_string(), args.iter().map(|s| s.to_string()).collect())
+        };
+
+        let mut cmd = CommandBuilder::new(&actual_cmd);
+        for arg in &actual_args {
+            cmd.arg(arg);
         }
 
         // Set working directory
-        cmd.cwd(working_dir);
+        // Note: bwrap uses --chdir internally, but for sandbox-exec and non-sandboxed
+        // cases, we need to set it here
+        #[cfg(target_os = "linux")]
+        if !sandboxed {
+            cmd.cwd(working_dir);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            cmd.cwd(working_dir);
+        }
 
         // Inherit environment
         for (key, value) in std::env::vars() {
@@ -67,7 +88,11 @@ impl PtyHandle {
             .take_writer()
             .context("failed to take PTY writer")?;
 
-        info!(shell = %shell, "spawned PTY process");
+        info!(
+            shell = %shell,
+            sandboxed = sandboxed,
+            "spawned PTY process"
+        );
 
         Ok(PtyHandle {
             master: pair.master,
@@ -121,6 +146,11 @@ impl PtyHandle {
     #[allow(dead_code)]
     pub fn kill(&mut self) -> Result<()> {
         self.child.kill().context("failed to kill child")
+    }
+
+    /// Get the process ID of the child
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
     }
 }
 

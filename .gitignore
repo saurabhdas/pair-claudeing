@@ -34,3 +34,9 @@ Thumbs.db
 # Temporary
 *.sock
 *.tmp
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm

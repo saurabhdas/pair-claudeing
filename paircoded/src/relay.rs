@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::{protocol::Message, http::Request}};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -18,11 +18,28 @@ pub struct RelayConnection {
 }
 
 impl RelayConnection {
-    /// Connect to the relay service
-    pub async fn connect(url: &Url, handshake: HandshakeMessage) -> Result<Self> {
-        info!(url = %url, "connecting to relay");
+    /// Connect to the relay service with optional JWT authentication
+    pub async fn connect(url: &Url, handshake: HandshakeMessage, token: Option<&str>) -> Result<Self> {
+        info!(url = %url, has_token = token.is_some(), "connecting to relay");
 
-        let (ws_stream, response) = connect_async(url.as_str())
+        // Build request with optional Authorization header
+        let mut request = Request::builder()
+            .uri(url.as_str())
+            .header("Host", url.host_str().unwrap_or("localhost"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key());
+
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let request = request
+            .body(())
+            .context("failed to build WebSocket request")?;
+
+        let (ws_stream, response) = connect_async_with_config(request, None, false)
             .await
             .context("failed to connect to relay")?;
 
@@ -59,6 +76,13 @@ impl RelayConnection {
                     }
                 }
             }
+            // Channel closed - send a graceful close frame
+            info!("sending graceful close frame on data connection");
+            let close_frame = tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: "client shutdown".into(),
+            };
+            let _ = ws_sink.send(Message::Close(Some(close_frame))).await;
             debug!("relay send task finished");
         });
 

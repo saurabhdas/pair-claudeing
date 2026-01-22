@@ -11,11 +11,15 @@ import type { WebSocket, RawData } from 'ws';
 import { parseClientMessage, createResizeMessage, type ParsedSnapshotMessage } from '../protocol/index.js';
 import { SessionManager, Session, SessionState, type ClientState } from '../session/index.js';
 import { createChildLogger } from '../utils/logger.js';
+import { extractBearerToken, verifyToken } from '../server/jwt.js';
+import type { Config } from '../config.js';
 
 const log = createChildLogger('terminal-data-handler');
 
 export interface TerminalDataHandlerOptions {
   sessionManager: SessionManager;
+  config: Config;
+  authHeader?: string;
 }
 
 export function handleTerminalDataConnection(
@@ -24,7 +28,22 @@ export function handleTerminalDataConnection(
   terminalName: string,
   options: TerminalDataHandlerOptions
 ): void {
-  const { sessionManager } = options;
+  const { sessionManager, config, authHeader } = options;
+
+  // Validate JWT token
+  const token = extractBearerToken(authHeader);
+  if (!token) {
+    log.warn({ sessionId, terminalName }, 'terminal data connection rejected: missing authorization');
+    ws.close(4401, 'Missing authorization');
+    return;
+  }
+
+  const jwtPayload = verifyToken(token, config);
+  if (!jwtPayload) {
+    log.warn({ sessionId, terminalName }, 'terminal data connection rejected: invalid token');
+    ws.close(4401, 'Invalid token');
+    return;
+  }
 
   // Get session
   const session = sessionManager.getSession(sessionId);
@@ -33,6 +52,15 @@ export function handleTerminalDataConnection(
     ws.close(4404, 'Session not found');
     return;
   }
+
+  // Verify user is the session owner
+  if (!session.isOwner(jwtPayload.sub)) {
+    log.warn({ sessionId, terminalName, userId: jwtPayload.sub, owner: session.owner?.userId }, 'terminal data connection rejected: not the owner');
+    ws.close(4403, 'Not the session owner');
+    return;
+  }
+
+  log.info({ sessionId, terminalName, userId: jwtPayload.sub, username: jwtPayload.username }, 'authenticated terminal data connection');
 
   // Get or create the terminal
   let terminal = session.getTerminal(terminalName);
@@ -53,8 +81,9 @@ export function handleTerminalDataConnection(
 
   // Handle connection close
   ws.on('close', (code, reason) => {
-    log.info({ sessionId, terminalName, code, reason: reason.toString() }, 'terminal data connection closed');
-    handleDataDisconnect(session, terminalName);
+    const reasonStr = reason.toString();
+    log.info({ sessionId, terminalName, code, reason: reasonStr }, 'terminal data connection closed');
+    handleDataDisconnect(session, terminalName, code, reasonStr);
   });
 
   // Handle errors
@@ -227,7 +256,12 @@ function handleExit(session: Session, terminalName: string, code: number): void 
   session.closeTerminal(terminalName);
 }
 
-function handleDataDisconnect(session: Session, terminalName: string): void {
+function handleDataDisconnect(
+  session: Session,
+  terminalName: string,
+  closeCode: number,
+  closeReason: string
+): void {
   if (session.state === SessionState.CLOSED || session.state === SessionState.CLOSING) {
     return;
   }
@@ -235,16 +269,36 @@ function handleDataDisconnect(session: Session, terminalName: string): void {
   const terminal = session.getTerminal(terminalName);
   if (!terminal) return;
 
-  // Notify clients
-  const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'data_connection_lost' });
-  for (const ws of terminal.interactiveClients.keys()) {
-    if (ws.readyState === 1) {
-      ws.send(disconnectMessage);
+  // Check if this was a graceful shutdown
+  const isGracefulShutdown = closeCode === 1000 && closeReason === 'client shutdown';
+
+  if (isGracefulShutdown) {
+    // Graceful shutdown - notify clients that session ended
+    log.info({ sessionId: session.id, terminalName }, 'terminal data connection closed gracefully');
+    const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'session_ended' });
+    for (const ws of terminal.interactiveClients.keys()) {
+      if (ws.readyState === 1) {
+        ws.send(disconnectMessage);
+      }
     }
-  }
-  for (const ws of terminal.mirrorClients.keys()) {
-    if (ws.readyState === 1) {
-      ws.send(disconnectMessage);
+    for (const ws of terminal.mirrorClients.keys()) {
+      if (ws.readyState === 1) {
+        ws.send(disconnectMessage);
+      }
+    }
+  } else {
+    // Network disconnect - notify clients of connection loss
+    log.info({ sessionId: session.id, terminalName, closeCode, closeReason }, 'terminal data connection lost');
+    const disconnectMessage = JSON.stringify({ type: 'disconnect', reason: 'data_connection_lost' });
+    for (const ws of terminal.interactiveClients.keys()) {
+      if (ws.readyState === 1) {
+        ws.send(disconnectMessage);
+      }
+    }
+    for (const ws of terminal.mirrorClients.keys()) {
+      if (ws.readyState === 1) {
+        ws.send(disconnectMessage);
+      }
     }
   }
 

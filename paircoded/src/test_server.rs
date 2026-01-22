@@ -29,6 +29,7 @@ mod server_prefix {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HandshakeMessage {
     version: String,
     shell: String,

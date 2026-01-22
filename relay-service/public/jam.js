@@ -31,11 +31,18 @@
   let fitLeft = null;
   let fitRight = null;
 
-  // Panel state
-  let leftSelection = { sessionId: null, terminalName: 'main' };
-  let rightSelection = { sessionId: null, terminalName: 'main' };
+  // Panel state (terminalName is assigned dynamically when connecting)
+  let leftSelection = { sessionId: null, terminalName: null };
+  let rightSelection = { sessionId: null, terminalName: null };
   let leftSetupComplete = false;
   let rightSetupComplete = false;
+
+  // User's own sessions (for dropdown display)
+  let mySessions = [];
+  let myClosedSessions = [];
+
+  // Cache of session display info (persists even when session closes)
+  const sessionInfoCache = new Map();
 
   const textDecoder = new TextDecoder('utf-8', { fatal: false });
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -89,12 +96,18 @@
     // Set up panel divider drag
     setupDivider();
 
-    // Set up panel selection handlers
-    setupPanelSelectors();
+    // Set up dropdown handlers
+    setupDropdowns();
 
     // Set up modal handlers
     setupModals();
+
+    // Note: User's sessions are now sent via WebSocket in jam_state
+    // No polling needed - updates come via session_status_update messages
   }
+
+  // Note: fetchMySessions() removed - sessions now come via WebSocket jam_state message
+  // and updates via session_status_update messages
 
   // =========================================================================
   // UI Status
@@ -297,6 +310,31 @@
       case 'jam_state':
         jamState = msg;
         setStatus('connected', 'Connected');
+
+        // Update mySessions from WebSocket data
+        mySessions = (msg.userSessions || []).map(s => ({
+          id: s.id,
+          state: s.state,
+          controlConnected: s.controlConnected,
+          controlHandshake: {
+            hostname: s.hostname,
+            workingDir: s.workingDir,
+          },
+        }));
+
+        // Update session info cache
+        mySessions.forEach(s => {
+          const isLive = s.controlConnected && (s.state === 'READY' || s.state === 'ACTIVE');
+          sessionInfoCache.set(s.id, {
+            hostname: s.controlHandshake?.hostname || 'unknown',
+            workingDir: s.controlHandshake?.workingDir || '',
+            username: '',
+            isLive: isLive,
+            isOffline: !isLive && (s.state === 'READY' || s.state === 'ACTIVE'),
+            isClosed: false,
+          });
+        });
+
         updateUI();
         break;
 
@@ -312,11 +350,18 @@
         handlePanelStateUpdate(msg);
         break;
 
+      case 'session_status_update':
+        handleSessionStatusUpdate(msg);
+        break;
+
       case 'error':
         console.error('Jam error:', msg.error, msg.code);
         if (msg.code === 'JAM_NOT_FOUND' || msg.code === 'NOT_PARTICIPANT') {
           alert(msg.error);
           window.location.href = '/';
+        } else if (msg.code === 'NOT_OWNER' || msg.code === 'OWNER_CANNOT_CHANGE_RIGHT') {
+          // Panel access error - revert dropdown
+          console.warn('Panel access denied:', msg.error);
         }
         break;
 
@@ -334,7 +379,7 @@
       if (existing) {
         existing.online = true;
       } else {
-        jamState.participants.push({ ...msg.participant, online: true, panelStates: [] });
+        jamState.participants.push({ ...msg.participant, online: true });
       }
     } else if (msg.action === 'left') {
       // Mark participant as offline
@@ -345,6 +390,7 @@
     }
 
     updateParticipantsUI();
+    updatePageTitle();
   }
 
   function handleSessionPoolUpdate(msg) {
@@ -358,12 +404,13 @@
     } else if (msg.action === 'removed' && msg.sessionId) {
       jamState.sessions = jamState.sessions.filter(s => s.sessionId !== msg.sessionId);
 
-      // If removed session was selected, clear selection
+      // If removed session was selected, clear that panel locally
+      // (the server should also broadcast a panel state update)
       if (leftSelection.sessionId === msg.sessionId) {
-        selectSession('left', null, 'main');
+        applyPanelState('left', null);
       }
       if (rightSelection.sessionId === msg.sessionId) {
-        selectSession('right', null, 'main');
+        applyPanelState('right', null);
       }
     }
 
@@ -372,24 +419,94 @@
   }
 
   function handlePanelStateUpdate(msg) {
-    // Update panel state in jam state for the user
+    // Shared panel state update - apply to local view
     if (!jamState) return;
 
-    const participant = jamState.participants.find(p => p.userId === msg.userId);
-    if (participant) {
-      if (!participant.panelStates) participant.panelStates = [];
-      const existing = participant.panelStates.find(s => s.panel === msg.panel);
-      if (existing) {
-        existing.sessionId = msg.sessionId;
-        existing.terminalName = msg.terminalName;
-      } else {
-        participant.panelStates.push({
-          panel: msg.panel,
-          sessionId: msg.sessionId,
-          terminalName: msg.terminalName,
+    const { panel, sessionId } = msg;
+
+    // Update local state
+    if (!jamState.panelStates) {
+      jamState.panelStates = { left: null, right: null };
+    }
+    jamState.panelStates[panel] = { sessionId };
+
+    // Apply the change locally (switch terminal view)
+    applyPanelState(panel, sessionId);
+  }
+
+  function handleSessionStatusUpdate(msg) {
+    const { sessionId, status, reason, hostname, workingDir } = msg;
+
+    console.log('Session status update:', msg);
+
+    const isOnline = status === 'online';
+    const isClosed = status === 'closed';
+    const isOffline = status === 'offline';
+
+    // Update session info cache
+    const cached = sessionInfoCache.get(sessionId);
+    if (cached) {
+      cached.isLive = isOnline;
+      cached.isClosed = isClosed;
+      cached.isOffline = isOffline;
+      if (hostname) cached.hostname = hostname;
+      if (workingDir) cached.workingDir = workingDir;
+      if (reason) cached.closedReason = reason;
+    } else {
+      // Create new cache entry with the info from the event
+      sessionInfoCache.set(sessionId, {
+        hostname: hostname || 'unknown',
+        workingDir: workingDir || '',
+        username: '',
+        isLive: isOnline,
+        isClosed: isClosed,
+        isOffline: isOffline,
+        closedReason: reason,
+      });
+    }
+
+    // Update session in jam state if present
+    if (jamState && jamState.sessions) {
+      const jamSession = jamState.sessions.find(s => s.sessionId === sessionId);
+      if (jamSession) {
+        jamSession.isLive = isOnline;
+        jamSession.state = isOnline ? 'READY' : (isClosed ? 'CLOSED' : 'OFFLINE');
+        if (hostname) jamSession.hostname = hostname;
+        if (workingDir) jamSession.workingDir = workingDir;
+      }
+    }
+
+    // Update mySessions list
+    const mySession = mySessions.find(s => s.id === sessionId);
+    if (mySession) {
+      mySession.state = isOnline ? 'READY' : (isClosed ? 'CLOSED' : 'OFFLINE');
+    } else if (isOnline) {
+      // New session came online - add to mySessions if it's ours
+      // We'll need to fetch full details, but for now add basic info
+      mySessions.push({
+        id: sessionId,
+        state: 'READY',
+        controlHandshake: { hostname, workingDir },
+      });
+    }
+
+    // If closed, move to closed sessions list
+    if (isClosed) {
+      mySessions = mySessions.filter(s => s.id !== sessionId);
+      if (!myClosedSessions.find(s => s.id === sessionId)) {
+        myClosedSessions.push({
+          id: sessionId,
+          hostname,
+          workingDir,
+          reason,
+          closedAt: new Date().toISOString(),
         });
       }
     }
+
+    // Update dropdowns to reflect new status
+    updateSessionDropdowns();
+    updatePanelModes();
   }
 
   // =========================================================================
@@ -420,7 +537,7 @@
     }
 
     term.clear();
-    term.writeln(`Connecting to ${sessionId}:${terminalName}...`);
+    term.writeln(`Connecting to ${sessionId}...`);
 
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}`;
     const ws = new WebSocket(wsUrl);
@@ -434,10 +551,39 @@
 
     ws.onopen = function() {
       const dims = fitAddon.proposeDimensions();
+      const isInteractive = canEditPanel(panel);
+
+      // Determine action and terminal name
+      let action, name;
+
+      if (terminalName) {
+        // Specific terminal requested - join it (as interactive or mirror)
+        action = isInteractive ? 'new' : 'mirror';
+        name = terminalName;
+        console.log(`[${panel}] Connecting to specific terminal: ${name} (${action})`);
+      } else if (isInteractive) {
+        // No specific terminal, interactive user - start a new terminal
+        action = 'new';
+        name = 'new'; // Server will assign PID
+        console.log(`[${panel}] Starting new terminal`);
+      } else {
+        // No specific terminal, mirror user - find first available
+        action = 'mirror';
+        const session = jamState?.sessions.find(s => s.sessionId === sessionId);
+        if (session && session.terminals && session.terminals.length > 0) {
+          name = session.terminals[0].name;
+          console.log(`[${panel}] Mirroring first available terminal: ${name}`);
+        } else {
+          term.writeln('\r\n\x1b[33mNo active terminal to mirror. Waiting for session owner to connect...\x1b[0m');
+          ws.close();
+          return;
+        }
+      }
+
       const setupMsg = {
         type: 'setup',
-        action: canEditPanel(panel) ? 'new' : 'mirror',
-        name: terminalName,
+        action: action,
+        name: name,
         cols: dims ? dims.cols : 80,
         rows: dims ? dims.rows : 24,
       };
@@ -478,11 +624,57 @@
       case 'setup_response':
         console.log(`[${panel}] Setup response:`, msg);
         if (msg.success) {
+          // Store the actual terminal name (PID) returned by the server
+          const actualTerminalName = msg.name;
+          const selection = isLeft ? leftSelection : rightSelection;
+          const sessionId = selection.sessionId;
+
           if (isLeft) {
             leftSetupComplete = true;
+            leftSelection.terminalName = actualTerminalName;
           } else {
             rightSetupComplete = true;
+            rightSelection.terminalName = actualTerminalName;
           }
+          console.log(`[${panel}] Terminal name assigned: ${actualTerminalName}`);
+
+          // Update local jamState with the new terminal
+          if (jamState && sessionId) {
+            let session = jamState.sessions.find(s => s.sessionId === sessionId);
+
+            // If session not in jam yet (timing issue), add it
+            if (!session) {
+              const mySession = mySessions.find(s => s.id === sessionId);
+              if (mySession) {
+                session = {
+                  sessionId: sessionId,
+                  addedBy: { userId: currentUser.id, login: currentUser.login },
+                  terminals: [],
+                  hostname: mySession.controlHandshake?.hostname,
+                  workingDir: mySession.controlHandshake?.workingDir,
+                  isLive: true,
+                };
+                jamState.sessions.push(session);
+                console.log(`[${panel}] Added session ${sessionId} to jam state`);
+              }
+            }
+
+            if (session) {
+              if (!session.terminals) {
+                session.terminals = [];
+              }
+              // Add terminal if not already present
+              if (!session.terminals.find(t => t.name === actualTerminalName)) {
+                session.terminals.push({ name: actualTerminalName });
+                console.log(`[${panel}] Added terminal ${actualTerminalName} to session ${sessionId}`);
+              }
+            }
+          }
+
+          // Update dropdown button and menu to show the terminal
+          updateDropdownButton(panel, sessionId);
+          updateSessionDropdowns();
+
           term.clear();
         } else {
           term.writeln(`\r\n\x1b[31mSetup failed: ${msg.error || 'Unknown error'}\x1b[0m`);
@@ -507,9 +699,108 @@
   // =========================================================================
 
   function updateUI() {
+    updatePageTitle();
     updateParticipantsUI();
     updateSessionDropdowns();
     updatePanelModes();
+    updatePanelControls();
+    applyInitialPanelStates();
+  }
+
+  function updatePageTitle() {
+    if (!jamState || !currentUser) return;
+
+    const otherParticipants = jamState.participants.filter(p => p.userId !== currentUser.id);
+    const otherNames = otherParticipants.map(p => p.login);
+
+    let withPart;
+    if (otherNames.length === 0) {
+      withPart = 'yourself';
+    } else if (otherNames.length === 1) {
+      withPart = otherNames[0];
+    } else if (otherNames.length === 2) {
+      withPart = `${otherNames[0]} and ${otherNames[1]}`;
+    } else {
+      withPart = `${otherNames.slice(0, -1).join(', ')}, and ${otherNames[otherNames.length - 1]}`;
+    }
+
+    document.title = `${jamId} · PairCode Jam with ${withPart}`;
+  }
+
+  function isOwner() {
+    return jamState && currentUser && jamState.jam.owner.id === currentUser.id;
+  }
+
+  function updatePanelControls() {
+    // Dropdown buttons handle their own disabled state via updateDropdownButton
+    // Just refresh the dropdowns
+    updateSessionDropdowns();
+  }
+
+  function applyInitialPanelStates() {
+    if (!jamState || !jamState.panelStates) return;
+
+    const { left, right } = jamState.panelStates;
+
+    // On page load, try to connect to an EXISTING terminal, don't create new ones
+    if (left && left.sessionId) {
+      const session = jamState.sessions.find(s => s.sessionId === left.sessionId);
+      if (session && session.terminals && session.terminals.length > 0) {
+        // Connect to first existing terminal
+        const terminalName = session.terminals[0].name;
+        applyPanelStateWithTerminal('left', left.sessionId, terminalName);
+      } else {
+        // No terminal yet - just update the dropdown button, don't connect
+        updateDropdownButton('left', left.sessionId);
+      }
+    }
+    if (right && right.sessionId) {
+      const session = jamState.sessions.find(s => s.sessionId === right.sessionId);
+      if (session && session.terminals && session.terminals.length > 0) {
+        // Connect to first existing terminal
+        const terminalName = session.terminals[0].name;
+        applyPanelStateWithTerminal('right', right.sessionId, terminalName);
+      } else {
+        // No terminal yet - just update the dropdown button, don't connect
+        updateDropdownButton('right', right.sessionId);
+      }
+    }
+  }
+
+  function applyPanelStateWithTerminal(panel, sessionId, terminalName) {
+    // Update local selection state with specific terminal
+    if (panel === 'left') {
+      leftSelection = { sessionId, terminalName };
+    } else {
+      rightSelection = { sessionId, terminalName };
+    }
+
+    // Update dropdown button
+    updateDropdownButton(panel, sessionId);
+
+    // Update panel mode display
+    updatePanelModes();
+
+    // Connect to the specific terminal
+    connectTerminal(panel, sessionId, terminalName);
+  }
+
+  function applyPanelState(panel, sessionId) {
+    // Update local selection state (terminalName is assigned on connection)
+    if (panel === 'left') {
+      leftSelection = { sessionId, terminalName: null };
+    } else {
+      rightSelection = { sessionId, terminalName: null };
+    }
+
+    // Update dropdown button to show current selection
+    updateDropdownButton(panel, sessionId);
+
+    // Update panel mode display
+    updatePanelModes();
+
+    // Connect to terminal (terminalName will be assigned by server for 'new' action)
+    connectTerminal(panel, sessionId, null);
   }
 
   function updateParticipantsUI() {
@@ -536,63 +827,339 @@
   }
 
   function updateSessionDropdowns() {
-    if (!jamState) return;
-
-    const leftSelect = document.getElementById('select-left');
-    const rightSelect = document.getElementById('select-right');
-
-    const renderOptions = (select, currentSessionId) => {
-      const currentValue = currentSessionId || '';
-      select.innerHTML = '<option value="">Select session...</option>' +
-        jamState.sessions.map(s => {
-          const owner = s.addedBy.login;
-          const status = s.isLive ? '' : ' (offline)';
-          const selected = s.sessionId === currentValue ? 'selected' : '';
-          return `<option value="${s.sessionId}" ${selected}>${s.sessionId} (@${owner})${status}</option>`;
-        }).join('');
-    };
-
-    renderOptions(leftSelect, leftSelection.sessionId);
-    renderOptions(rightSelect, rightSelection.sessionId);
+    updateDropdownButton('left', leftSelection.sessionId);
+    updateDropdownButton('right', rightSelection.sessionId);
+    updateDropdownMenu('left');
+    updateDropdownMenu('right');
   }
+
+  function formatWorkingDir(workingDir, username) {
+    if (!workingDir) return '';
+
+    // If username provided, try exact match first
+    if (username) {
+      const homePatterns = [
+        `/home/${username}`,
+        `/Users/${username}`,
+      ];
+      for (const pattern of homePatterns) {
+        if (workingDir.startsWith(pattern)) {
+          return '~' + workingDir.slice(pattern.length);
+        }
+      }
+    }
+
+    // Generic detection: /home/XXX/... or /Users/XXX/...
+    const homeMatch = workingDir.match(/^(\/home\/[^\/]+|\/Users\/[^\/]+)(\/.*)?$/);
+    if (homeMatch) {
+      return '~' + (homeMatch[2] || '');
+    }
+
+    return workingDir;
+  }
+
+  function getSessionDisplayInfo(sessionId) {
+    const jamSession = jamState?.sessions.find(s => s.sessionId === sessionId);
+    const mySession = mySessions.find(s => s.id === sessionId);
+    const cached = sessionInfoCache.get(sessionId);
+
+    // Priority: jam session > my session > cache
+    const hostname = jamSession?.hostname || mySession?.controlHandshake?.hostname || cached?.hostname || 'unknown';
+    const workingDir = jamSession?.workingDir || mySession?.controlHandshake?.workingDir || cached?.workingDir || '';
+    const username = mySession?.controlHandshake?.username || cached?.username || '';
+
+    // Check if session is live (from jam state or my sessions)
+    // Must check controlConnected - session can be in READY state but disconnected
+    let isLive = jamSession?.isLive || (mySession?.controlConnected && (mySession?.state === 'READY' || mySession?.state === 'ACTIVE'));
+
+    // Check if session is closed - from jam state, cache, or mySession
+    // A session is closed if it's in the jam with state 'CLOSED', or marked closed in cache
+    const isClosed = jamSession?.state === 'CLOSED' || cached?.isClosed || false;
+
+    // Check if session is offline (control disconnected but not closed - waiting for reconnect)
+    // Offline means: not live, not closed, but still exists
+    const isOffline = !isLive && !isClosed && (jamSession || cached?.isOffline);
+
+    // If offline or closed, ensure isLive is false
+    if (isOffline || isClosed) {
+      isLive = false;
+    }
+
+    // Shorten hostname (remove .local, .lan, etc.)
+    const shortHostname = hostname.replace(/\.(local|lan|home|internal)$/i, '');
+
+    return {
+      hostname: shortHostname,
+      workingDir: formatWorkingDir(workingDir, username),
+      isLive,
+      isOffline,
+      isClosed,
+    };
+  }
+
+  function updateDropdownButton(panel, sessionId) {
+    const btn = document.getElementById(`dropdown-btn-${panel}`);
+    const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
+
+    btn.disabled = !canControl;
+
+    if (!sessionId) {
+      btn.innerHTML = `<span class="session-label">Select terminal...</span><span class="arrow">▼</span>`;
+      return;
+    }
+
+    const info = getSessionDisplayInfo(sessionId);
+    const statusClass = info.isClosed ? 'closed' : (info.isLive ? 'live' : 'offline');
+
+    // Get the terminal name from selection
+    const selection = panel === 'left' ? leftSelection : rightSelection;
+    const terminalName = selection.terminalName;
+
+    // Format: "PID xxx @ hostname" or "hostname" if no terminal yet
+    let displayText;
+    if (terminalName) {
+      displayText = `PID ${terminalName} @ ${info.hostname}`;
+    } else {
+      displayText = info.hostname;
+    }
+
+    btn.innerHTML = `
+      <span class="status-dot ${statusClass}"></span>
+      <span class="session-label ${info.isClosed ? 'closed' : ''}">${displayText}</span>
+      <span class="arrow">▼</span>
+    `;
+  }
+
+  function updateDropdownMenu(panel) {
+    const menu = document.getElementById(`dropdown-menu-${panel}`);
+    if (!jamState) {
+      menu.innerHTML = '<div class="session-dropdown-label">Loading...</div>';
+      return;
+    }
+
+    const jamSessionIds = new Set(jamState.sessions.map(s => s.sessionId));
+
+    // Build list: jam terminals first, then user's sessions not in jam
+    let html = '';
+
+    // Terminals in the jam (flatten sessions into terminals)
+    const terminals = [];
+    jamState.sessions.forEach(s => {
+      const info = getSessionDisplayInfo(s.sessionId);
+      if (s.terminals && s.terminals.length > 0) {
+        // Add each terminal
+        s.terminals.forEach(t => {
+          terminals.push({
+            sessionId: s.sessionId,
+            terminalName: t.name,
+            addedBy: s.addedBy,
+            hostname: info.hostname || 'unknown',
+            isLive: info.isLive,
+            isClosed: info.isClosed,
+            isOffline: info.isOffline,
+          });
+        });
+      } else if (info.isLive) {
+        // Session is live but no terminals yet - show as "waiting"
+        terminals.push({
+          sessionId: s.sessionId,
+          terminalName: null,
+          addedBy: s.addedBy,
+          hostname: info.hostname || 'unknown',
+          isLive: true,
+          isClosed: false,
+          isOffline: false,
+          waiting: true,
+        });
+      }
+    });
+
+    if (terminals.length > 0) {
+      html += '<div class="session-dropdown-label">In this jam</div>';
+      terminals.forEach(t => {
+        const isMine = t.addedBy.userId === currentUser.id;
+        const statusClass = t.isClosed ? 'closed' : (t.isLive ? 'live' : 'offline');
+        const itemClass = t.isClosed ? 'session-dropdown-item closed-session' : 'session-dropdown-item';
+
+        // Format: "@username: PID xxx" and "hostname" on second line
+        const pidDisplay = t.terminalName ? `PID ${t.terminalName}` : 'waiting...';
+        const canClick = t.terminalName !== null;
+        const onClickAttr = canClick
+          ? `onclick="selectTerminalFromDropdown('${panel}', '${t.sessionId}', '${t.terminalName}')"`
+          : '';
+
+        html += `
+          <div class="${itemClass}${canClick ? '' : ' disabled'}" data-session-id="${t.sessionId}" ${onClickAttr}>
+            <span class="status-dot ${statusClass}"></span>
+            <div class="session-info">
+              <div class="session-id">@${t.addedBy.login}: ${pidDisplay}</div>
+              <div class="session-owner">${t.hostname}</div>
+            </div>
+            ${isMine ? `<button class="remove-btn" onclick="event.stopPropagation(); removeSessionFromJam('${t.sessionId}')" title="Remove from jam">×</button>` : ''}
+          </div>
+        `;
+      });
+    }
+
+    // User's sessions (always show all - clicking adds a new terminal)
+    const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
+
+    if (canControl && mySessions.length > 0) {
+      if (terminals.length > 0) {
+        html += '<div class="session-dropdown-divider"></div>';
+      }
+      html += '<div class="session-dropdown-label">Your sessions (click to add terminal)</div>';
+      mySessions.forEach(s => {
+        const isLive = s.controlConnected && (s.state === 'READY' || s.state === 'ACTIVE');
+        const hostname = s.controlHandshake?.hostname || 'unknown';
+        const username = s.controlHandshake?.username || '';
+        const workingDir = formatWorkingDir(s.controlHandshake?.workingDir, username) || '/';
+        html += `
+          <div class="session-dropdown-item not-in-jam" onclick="addAndSelectSession('${panel}', '${s.id}')">
+            <span class="status-dot ${isLive ? 'live' : 'offline'}"></span>
+            <div class="session-info">
+              <div class="session-id">${hostname}</div>
+              <div class="session-owner">${workingDir}</div>
+            </div>
+            <span class="add-hint">+ Add</span>
+          </div>
+        `;
+      });
+    }
+
+    if (!html) {
+      html = '<div class="session-dropdown-label">No sessions available</div>';
+    }
+
+    menu.innerHTML = html;
+  }
+
+  window.selectSessionFromDropdown = function(panel, sessionId) {
+    closeAllDropdowns();
+    selectSession(panel, sessionId);
+  };
+
+  window.selectTerminalFromDropdown = function(panel, sessionId, terminalName) {
+    closeAllDropdowns();
+    selectTerminal(panel, sessionId, terminalName);
+  };
+
+  window.addAndSelectSession = function(panel, sessionId) {
+    closeAllDropdowns();
+    // First add the session to the jam, then select it
+    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
+      jamWs.send(JSON.stringify({
+        type: 'add_session',
+        sessionId
+      }));
+      // After adding, select it (the panel_state_update will apply it)
+      // Small delay to let the add complete
+      setTimeout(() => {
+        selectSession(panel, sessionId);
+      }, 100);
+    }
+  };
+
+  window.removeSessionFromJam = function(sessionId) {
+    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
+      jamWs.send(JSON.stringify({
+        type: 'remove_session',
+        sessionId
+      }));
+    }
+  };
 
   // =========================================================================
   // Panel Selection
   // =========================================================================
 
-  function setupPanelSelectors() {
-    const leftSelect = document.getElementById('select-left');
-    const rightSelect = document.getElementById('select-right');
-
-    leftSelect.addEventListener('change', function() {
-      selectSession('left', this.value || null, 'main');
+  function setupDropdowns() {
+    // Toggle dropdown on button click
+    document.getElementById('dropdown-btn-left').addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleDropdown('left');
+    });
+    document.getElementById('dropdown-btn-right').addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleDropdown('right');
     });
 
-    rightSelect.addEventListener('change', function() {
-      selectSession('right', this.value || null, 'main');
+    // Close dropdowns when clicking outside
+    document.addEventListener('click', function() {
+      closeAllDropdowns();
     });
   }
 
-  function selectSession(panel, sessionId, terminalName) {
+  function toggleDropdown(panel) {
+    const dropdown = document.getElementById(`dropdown-${panel}`);
+    const wasOpen = dropdown.classList.contains('open');
+
+    closeAllDropdowns();
+
+    if (!wasOpen) {
+      // Check if user can control this panel
+      const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
+      if (!canControl) return;
+
+      dropdown.classList.add('open');
+    }
+  }
+
+  function closeAllDropdowns() {
+    document.querySelectorAll('.session-dropdown').forEach(d => d.classList.remove('open'));
+  }
+
+  function selectSession(panel, sessionId) {
+    // Check permission locally (server will also validate)
+    const owner = isOwner();
+    const canChange = (panel === 'left' && owner) || (panel === 'right' && !owner);
+
+    if (!canChange) {
+      return;
+    }
+
+    // Send to server - the broadcast will apply the change to all clients
+    // Terminal name is no longer sent - it's determined at connection time (PID-based)
+    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
+      jamWs.send(JSON.stringify({
+        type: 'panel_select',
+        panel,
+        sessionId,
+      }));
+    }
+  }
+
+  function selectTerminal(panel, sessionId, terminalName) {
+    // Check permission locally
+    const owner = isOwner();
+    const canChange = (panel === 'left' && owner) || (panel === 'right' && !owner);
+
+    if (!canChange) {
+      return;
+    }
+
+    // Update local selection state with the specific terminal
     if (panel === 'left') {
       leftSelection = { sessionId, terminalName };
     } else {
       rightSelection = { sessionId, terminalName };
     }
 
+    // Update dropdown button
+    updateDropdownButton(panel, sessionId);
+
     // Update panel mode display
     updatePanelModes();
 
-    // Connect to terminal
+    // Connect to the specific terminal
     connectTerminal(panel, sessionId, terminalName);
 
-    // Notify jam WebSocket of panel selection
+    // Also broadcast the session selection so others know
     if (jamWs && jamWs.readyState === WebSocket.OPEN) {
       jamWs.send(JSON.stringify({
         type: 'panel_select',
         panel,
         sessionId,
-        terminalName,
       }));
     }
   }
@@ -657,14 +1224,10 @@
 
   function setupModals() {
     document.getElementById('invite-btn').addEventListener('click', openInviteModal);
-    document.getElementById('add-session-btn').addEventListener('click', openAddSessionModal);
 
     // Close on overlay click
     document.getElementById('invite-modal').addEventListener('click', function(e) {
       if (e.target === this) closeInviteModal();
-    });
-    document.getElementById('add-session-modal').addEventListener('click', function(e) {
-      if (e.target === this) closeAddSessionModal();
     });
 
     // Set up invite search
@@ -872,77 +1435,4 @@
       });
   };
 
-  window.openAddSessionModal = function() {
-    const modal = document.getElementById('add-session-modal');
-    const list = document.getElementById('add-session-list');
-
-    list.innerHTML = '<div class="no-peers">Loading...</div>';
-    modal.classList.add('visible');
-
-    // Fetch user's sessions
-    fetch('/api/my-sessions')
-      .then(res => res.json())
-      .then(data => {
-        const sessions = data.sessions || [];
-
-        if (sessions.length === 0) {
-          list.innerHTML = '<div class="no-peers">No active sessions. Start paircoded to create a session.</div>';
-          return;
-        }
-
-        // Filter out sessions already in the jam
-        const existingIds = new Set(jamState?.sessions.map(s => s.sessionId) || []);
-        const availableSessions = sessions.filter(s => !existingIds.has(s.id));
-
-        if (availableSessions.length === 0) {
-          list.innerHTML = '<div class="no-peers">All your sessions are already in this jam.</div>';
-          return;
-        }
-
-        list.innerHTML = availableSessions.map(session => `
-          <div class="modal-peer" onclick="addSessionToJam('${session.id}')">
-            <span style="font-family:monospace;">${session.id}</span>
-            <span style="color:#888;margin-left:8px;">${session.state}</span>
-          </div>
-        `).join('');
-      })
-      .catch(err => {
-        console.error('Failed to load sessions:', err);
-        list.innerHTML = '<div class="no-peers">Failed to load sessions.</div>';
-      });
-  };
-
-  window.closeAddSessionModal = function() {
-    document.getElementById('add-session-modal').classList.remove('visible');
-  };
-
-  window.addSessionToJam = function(sessionId) {
-    // Use WebSocket for real-time update
-    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
-      jamWs.send(JSON.stringify({
-        type: 'add_session',
-        sessionId
-      }));
-      closeAddSessionModal();
-    } else {
-      // Fallback to REST
-      fetch(`/api/jams/${jamId}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId })
-      })
-        .then(res => res.json())
-        .then(data => {
-          if (data.error) {
-            alert(data.error);
-          } else {
-            closeAddSessionModal();
-          }
-        })
-        .catch(err => {
-          console.error('Failed to add session:', err);
-          alert('Failed to add session');
-        });
-    }
-  };
 })();

@@ -56,6 +56,17 @@ export async function registerHttpRoutes(
     return { sessions: mySessions };
   });
 
+  // List current user's closed sessions (protected)
+  fastify.get('/api/my-closed-sessions', { preHandler: requireAuth }, async (request) => {
+    const user = getUser(request);
+    if (!user) {
+      return { sessions: [] };
+    }
+
+    const closedSessions = sessionManager.listClosedSessions(user.id.toString());
+    return { sessions: closedSessions };
+  });
+
   // Get session info (protected)
   fastify.get<{ Params: { sessionId: string } }>(
     '/api/sessions/:sessionId',

@@ -46,6 +46,7 @@ struct TokenResponse {
     token_type: Option<String>,
     scope: Option<String>,
     error: Option<String>,
+    #[allow(dead_code)]
     error_description: Option<String>,
 }
 

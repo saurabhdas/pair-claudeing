@@ -178,6 +178,14 @@
       background: #6e7681;
       color: white;
     }
+    .item-status.closed {
+      background: #484848;
+      color: #888;
+    }
+    .item-status.disconnected {
+      background: #da3633;
+      color: white;
+    }
     .item-status.invitation {
       background: #8b949e;
       color: white;
@@ -307,6 +315,16 @@
           <!-- Sessions will be loaded here -->
         </div>
       </div>
+
+      <!-- Closed Sessions Section -->
+      <div class="section" id="closed-sessions-section" style="display: none;">
+        <div class="section-header">
+          <h2>Closed Sessions</h2>
+        </div>
+        <div class="items-list" id="closed-sessions-list">
+          <!-- Closed sessions will be loaded here -->
+        </div>
+      </div>
     </div>
   </div>
 
@@ -344,6 +362,7 @@
       loadJams();
       loadJamInvitations();
       loadSessions();
+      loadClosedSessions();
     }
 
     function timeAgo(dateString) {
@@ -596,6 +615,56 @@
 
     function openSession(sessionId) {
       window.location.href = `/terminal/${sessionId}/${sessionId}`;
+    }
+
+    // =========================================================================
+    // Closed Sessions
+    // =========================================================================
+
+    function loadClosedSessions() {
+      fetch('/api/my-closed-sessions')
+        .then(res => res.json())
+        .then(data => {
+          renderClosedSessions(data.sessions || []);
+        })
+        .catch(err => {
+          console.error('Failed to load closed sessions:', err);
+          renderClosedSessions([]);
+        });
+    }
+
+    function renderClosedSessions(sessions) {
+      const section = document.getElementById('closed-sessions-section');
+      const container = document.getElementById('closed-sessions-list');
+
+      if (sessions.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+
+      section.style.display = 'block';
+
+      container.innerHTML = sessions.map(session => {
+        const hostname = session.hostname || 'unknown';
+        const workingDir = session.workingDir || '';
+        const reasonLabel = session.reason === 'graceful' ? 'Ended' :
+                           session.reason === 'timeout' ? 'Timed out' : 'Error';
+        const reasonClass = session.reason === 'graceful' ? 'closed' : 'disconnected';
+
+        return `
+          <div class="item-card" style="opacity: 0.7;">
+            <div class="item-card-header">
+              <span class="item-name">${session.id}</span>
+              <span class="item-status ${reasonClass}">${reasonLabel}</span>
+            </div>
+            <div class="item-meta">
+              <span>${hostname}</span>
+              <span>closed ${timeAgo(session.closedAt)}</span>
+            </div>
+            ${workingDir ? `<div class="item-path">${workingDir}</div>` : ''}
+          </div>
+        `;
+      }).join('');
     }
 
     // Auto-refresh every 10 seconds

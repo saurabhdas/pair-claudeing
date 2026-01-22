@@ -54,11 +54,13 @@ export interface JamSessionRow {
   added_by_user_id: number;
   added_by_login: string;
   added_at: string;
+  hostname: string | null;
+  working_dir: string | null;
+  closed_gracefully: number; // 0 or 1 (SQLite boolean)
 }
 
 export interface JamPanelStateRow {
   jam_id: string;
-  user_id: number;
   panel: 'left' | 'right';
   session_id: string | null;
   terminal_name: string;
@@ -186,19 +188,21 @@ function createTables(database: Database.Database): void {
       added_by_user_id INTEGER NOT NULL,
       added_by_login TEXT NOT NULL,
       added_at TEXT NOT NULL DEFAULT (datetime('now')),
+      hostname TEXT,
+      working_dir TEXT,
+      closed_gracefully INTEGER NOT NULL DEFAULT 0,
       UNIQUE(jam_id, session_id)
     )
   `);
 
-  // Jam panel state (persisted for reconnection)
+  // Jam panel state (shared across all participants)
   database.exec(`
     CREATE TABLE IF NOT EXISTS jam_panel_state (
       jam_id TEXT NOT NULL,
-      user_id INTEGER NOT NULL,
       panel TEXT NOT NULL,
       session_id TEXT,
       terminal_name TEXT NOT NULL DEFAULT 'main',
-      UNIQUE(jam_id, user_id, panel)
+      UNIQUE(jam_id, panel)
     )
   `);
 
@@ -382,6 +386,9 @@ export interface JamSession {
     login: string;
   };
   addedAt: string;
+  hostname?: string;
+  workingDir?: string;
+  closedGracefully: boolean;
 }
 
 export interface JamPanelState {
@@ -606,6 +613,9 @@ export function getJamSessions(jamId: string): JamSession[] {
       login: row.added_by_login,
     },
     addedAt: row.added_at,
+    hostname: row.hostname || undefined,
+    workingDir: row.working_dir || undefined,
+    closedGracefully: row.closed_gracefully === 1,
   }));
 }
 
@@ -616,15 +626,19 @@ export function addJamSession(
   jamId: string,
   sessionId: string,
   addedByUserId: number,
-  addedByLogin: string
+  addedByLogin: string,
+  hostname?: string,
+  workingDir?: string
 ): JamSession {
   const database = getDatabase();
   const stmt = database.prepare(`
-    INSERT INTO jam_sessions (jam_id, session_id, added_by_user_id, added_by_login, added_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(jam_id, session_id) DO NOTHING
+    INSERT INTO jam_sessions (jam_id, session_id, added_by_user_id, added_by_login, added_at, hostname, working_dir)
+    VALUES (?, ?, ?, ?, datetime('now'), ?, ?)
+    ON CONFLICT(jam_id, session_id) DO UPDATE SET
+      hostname = COALESCE(excluded.hostname, jam_sessions.hostname),
+      working_dir = COALESCE(excluded.working_dir, jam_sessions.working_dir)
   `);
-  stmt.run(jamId, sessionId, addedByUserId, addedByLogin);
+  stmt.run(jamId, sessionId, addedByUserId, addedByLogin, hostname || null, workingDir || null);
 
   return {
     sessionId,
@@ -633,6 +647,9 @@ export function addJamSession(
       login: addedByLogin,
     },
     addedAt: new Date().toISOString(),
+    hostname,
+    workingDir,
+    closedGracefully: false,
   };
 }
 
@@ -659,19 +676,42 @@ export function isSessionInJam(jamId: string, sessionId: string): boolean {
   return !!stmt.get(jamId, sessionId);
 }
 
+/**
+ * Mark a session as closed gracefully (for showing gray dot after refresh).
+ * Called when a session closes gracefully (Ctrl+C) vs timeout/error.
+ */
+export function markJamSessionClosed(sessionId: string, graceful: boolean): void {
+  const database = getDatabase();
+  const stmt = database.prepare(`
+    UPDATE jam_sessions SET closed_gracefully = ? WHERE session_id = ?
+  `);
+  stmt.run(graceful ? 1 : 0, sessionId);
+}
+
+/**
+ * Reset the closed state when a session comes back online.
+ */
+export function markJamSessionOnline(sessionId: string): void {
+  const database = getDatabase();
+  const stmt = database.prepare(`
+    UPDATE jam_sessions SET closed_gracefully = 0 WHERE session_id = ?
+  `);
+  stmt.run(sessionId);
+}
+
 // ============================================================================
-// Jam Panel State Operations
+// Jam Panel State Operations (shared across all participants)
 // ============================================================================
 
 /**
- * Get panel state for a user in a jam.
+ * Get shared panel state for a jam.
  */
-export function getJamPanelState(jamId: string, userId: number): JamPanelState[] {
+export function getJamPanelStates(jamId: string): JamPanelState[] {
   const database = getDatabase();
   const stmt = database.prepare(`
-    SELECT * FROM jam_panel_state WHERE jam_id = ? AND user_id = ?
+    SELECT * FROM jam_panel_state WHERE jam_id = ?
   `);
-  const rows = stmt.all(jamId, userId) as JamPanelStateRow[];
+  const rows = stmt.all(jamId) as JamPanelStateRow[];
 
   return rows.map(row => ({
     panel: row.panel,
@@ -681,51 +721,25 @@ export function getJamPanelState(jamId: string, userId: number): JamPanelState[]
 }
 
 /**
- * Set panel state for a user in a jam.
+ * Set shared panel state for a jam.
  */
 export function setJamPanelState(
   jamId: string,
-  userId: number,
   panel: 'left' | 'right',
   sessionId: string | null,
   terminalName: string = 'main'
 ): JamPanelState {
   const database = getDatabase();
   const stmt = database.prepare(`
-    INSERT INTO jam_panel_state (jam_id, user_id, panel, session_id, terminal_name)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(jam_id, user_id, panel) DO UPDATE SET
+    INSERT INTO jam_panel_state (jam_id, panel, session_id, terminal_name)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(jam_id, panel) DO UPDATE SET
       session_id = excluded.session_id,
       terminal_name = excluded.terminal_name
   `);
-  stmt.run(jamId, userId, panel, sessionId, terminalName);
+  stmt.run(jamId, panel, sessionId, terminalName);
 
   return { panel, sessionId, terminalName };
-}
-
-/**
- * Get all panel states for a jam (for broadcasting).
- */
-export function getAllJamPanelStates(jamId: string): Map<number, JamPanelState[]> {
-  const database = getDatabase();
-  const stmt = database.prepare(`
-    SELECT * FROM jam_panel_state WHERE jam_id = ?
-  `);
-  const rows = stmt.all(jamId) as JamPanelStateRow[];
-
-  const statesByUser = new Map<number, JamPanelState[]>();
-  for (const row of rows) {
-    if (!statesByUser.has(row.user_id)) {
-      statesByUser.set(row.user_id, []);
-    }
-    statesByUser.get(row.user_id)!.push({
-      panel: row.panel,
-      sessionId: row.session_id,
-      terminalName: row.terminal_name,
-    });
-  }
-
-  return statesByUser;
 }
 
 // ============================================================================

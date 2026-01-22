@@ -2,6 +2,7 @@
  * Session manager for tracking and managing terminal sessions.
  */
 
+import { EventEmitter } from 'node:events';
 import { v4 as uuidv4 } from 'uuid';
 import { Session } from './session.js';
 import { SessionState, type SessionInfo } from './types.js';
@@ -15,11 +16,50 @@ export type { SessionInfo, SessionData, SessionOwner, ControlHandshakeInfo, Term
 
 const log = createChildLogger('session-manager');
 
-export class SessionManager {
+/** Event emitted when a session is closed */
+export interface SessionClosedEvent {
+  sessionId: string;
+  ownerId: string | null;
+  hostname?: string;
+  workingDir?: string;
+  reason: 'graceful' | 'timeout' | 'error';
+}
+
+/** Event emitted when a session goes offline (control disconnected, waiting for reconnect) */
+export interface SessionOfflineEvent {
+  sessionId: string;
+  ownerId: string | null;
+  hostname?: string;
+  workingDir?: string;
+}
+
+/** Event emitted when a session comes online (control connected and handshake received) */
+export interface SessionOnlineEvent {
+  sessionId: string;
+  ownerId: string | null;
+  ownerUsername: string | null;
+  hostname?: string;
+  workingDir?: string;
+}
+
+/** Info about a closed session */
+export interface ClosedSessionInfo {
+  id: string;
+  owner: { userId: string; username: string } | null;
+  hostname?: string;
+  workingDir?: string;
+  closedAt: string;
+  reason: 'graceful' | 'timeout' | 'error';
+}
+
+export class SessionManager extends EventEmitter {
   private sessions: Map<string, Session> = new Map();
+  private closedSessions: ClosedSessionInfo[] = [];
   private config: Config;
+  private readonly maxClosedSessions = 50; // Keep last 50 closed sessions
 
   constructor(config: Config) {
+    super();
     this.config = config;
   }
 
@@ -67,15 +107,57 @@ export class SessionManager {
   /**
    * Delete a session.
    */
-  deleteSession(sessionId: string): boolean {
+  deleteSession(sessionId: string, reason: 'graceful' | 'timeout' | 'error' = 'timeout'): boolean {
     const session = this.sessions.get(sessionId);
     if (session) {
+      // Add to closed sessions list
+      this.addClosedSession(session, reason);
+
+      // Emit event before closing
+      const closedEvent: SessionClosedEvent = {
+        sessionId: session.id,
+        ownerId: session.owner?.userId || null,
+        hostname: session.controlHandshake?.hostname,
+        workingDir: session.controlHandshake?.workingDir,
+        reason,
+      };
+      this.emit('sessionClosed', closedEvent);
+
       session.close();
       this.sessions.delete(sessionId);
-      log.info({ sessionId }, 'session deleted');
+      log.info({ sessionId, reason }, 'session deleted');
       return true;
     }
     return false;
+  }
+
+  /**
+   * Add a session to the closed sessions list.
+   */
+  private addClosedSession(session: Session, reason: 'graceful' | 'timeout' | 'error'): void {
+    const closedInfo: ClosedSessionInfo = {
+      id: session.id,
+      owner: session.owner,
+      hostname: session.controlHandshake?.hostname,
+      workingDir: session.controlHandshake?.workingDir,
+      closedAt: new Date().toISOString(),
+      reason,
+    };
+    this.closedSessions.unshift(closedInfo);
+    // Keep only the last N closed sessions
+    if (this.closedSessions.length > this.maxClosedSessions) {
+      this.closedSessions = this.closedSessions.slice(0, this.maxClosedSessions);
+    }
+  }
+
+  /**
+   * List closed sessions for a specific user.
+   */
+  listClosedSessions(userId?: string): ClosedSessionInfo[] {
+    if (userId) {
+      return this.closedSessions.filter(s => s.owner?.userId === userId);
+    }
+    return [...this.closedSessions];
   }
 
   /**
@@ -116,5 +198,40 @@ export class SessionManager {
    */
   get paircodedReconnectTimeoutMs(): number {
     return this.config.paircodedReconnectTimeoutMs;
+  }
+
+  /**
+   * Notify that a session has gone offline (control disconnected, waiting for reconnect).
+   */
+  notifySessionOffline(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const offlineEvent: SessionOfflineEvent = {
+      sessionId: session.id,
+      ownerId: session.owner?.userId || null,
+      hostname: session.controlHandshake?.hostname,
+      workingDir: session.controlHandshake?.workingDir,
+    };
+    this.emit('sessionOffline', offlineEvent);
+    log.info({ sessionId }, 'session offline event emitted');
+  }
+
+  /**
+   * Notify that a session has come online (control connected and ready).
+   */
+  notifySessionOnline(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const onlineEvent: SessionOnlineEvent = {
+      sessionId: session.id,
+      ownerId: session.owner?.userId || null,
+      ownerUsername: session.owner?.username || null,
+      hostname: session.controlHandshake?.hostname,
+      workingDir: session.controlHandshake?.workingDir,
+    };
+    this.emit('sessionOnline', onlineEvent);
+    log.info({ sessionId, hostname: onlineEvent.hostname }, 'session online event emitted');
   }
 }

@@ -5,7 +5,10 @@ use clap::Parser;
 use rand::Rng;
 use std::env;
 use std::path::PathBuf;
+use tracing::warn;
 use url::Url;
+
+use crate::sandbox;
 
 /// Default relay URL
 const DEFAULT_RELAY_URL: &str = "https://retrievable-timidly-drusilla.ngrok-free.app";
@@ -40,6 +43,11 @@ pub struct Args {
     /// Disable automatic reconnection on disconnect
     #[arg(long)]
     pub no_reconnect: bool,
+
+    /// Enable sandboxing to restrict filesystem access to the working directory
+    /// (Linux: bubblewrap, macOS: sandbox-exec)
+    #[arg(long)]
+    pub sandbox: bool,
 }
 
 /// Runtime configuration derived from CLI args and environment
@@ -63,20 +71,17 @@ pub struct Config {
     /// Optional command to run instead of interactive shell
     pub command: Option<String>,
 
-    /// Verbose logging enabled
-    pub verbose: bool,
-
     /// Auto-reconnect on disconnect
     pub reconnect: bool,
-
-    /// Force login even if token exists
-    pub force_login: bool,
 
     /// Computer hostname
     pub hostname: String,
 
     /// Username
     pub username: String,
+
+    /// Sandbox mode (uses bubblewrap on Linux)
+    pub sandbox: bool,
 }
 
 impl Config {
@@ -150,6 +155,18 @@ impl Config {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
+        // Determine sandbox mode (disabled by default, enable with --sandbox)
+        let sandbox = if args.sandbox {
+            if sandbox::is_sandbox_available() {
+                true
+            } else {
+                warn!("Sandboxing not available on this platform, running without sandbox");
+                false
+            }
+        } else {
+            false
+        };
+
         Ok(Config {
             relay_url,
             session_name,
@@ -157,11 +174,10 @@ impl Config {
             working_dir,
             shell,
             command: args.command,
-            verbose: args.verbose,
             reconnect: !args.no_reconnect,
-            force_login: args.login,
             hostname,
             username: username.to_string(),
+            sandbox,
         })
     }
 
@@ -191,6 +207,7 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
+            sandbox: false,
         };
         let config = Config::from_args(args, "testuser").unwrap();
         assert!(config.session_name.starts_with("testuser-"));
@@ -207,6 +224,7 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
+            sandbox: false,
         };
         let config = Config::from_args(args, "testuser").unwrap();
         assert_eq!(config.session_name, "my-custom-session");
@@ -222,6 +240,7 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
+            sandbox: false,
         };
         let config = Config::from_args(args, "user").unwrap();
         assert_eq!(config.relay_url.scheme(), "wss");
@@ -238,6 +257,7 @@ mod tests {
             command: None,
             verbose: false,
             no_reconnect: false,
+            sandbox: false,
         };
         let config = Config::from_args(args, "user").unwrap();
         assert_eq!(config.shell, "/bin/zsh");

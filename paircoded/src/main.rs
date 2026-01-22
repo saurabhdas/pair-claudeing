@@ -18,10 +18,13 @@ mod control;
 mod protocol;
 mod pty;
 mod relay;
+mod sandbox;
 mod terminal_manager;
 
 use anyhow::Result;
 use clap::Parser;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -30,11 +33,14 @@ use crate::config::{Args, Config};
 use crate::control::{ControlConnection, ControlEvent, HandshakeInfo, ReconnectManager};
 use crate::terminal_manager::{TerminalEvent, TerminalManager};
 
+/// Shared JWT token that can be updated when refreshed
+pub type SharedToken = Arc<RwLock<String>>;
+
 fn setup_logging(verbose: bool) {
     let filter = if verbose {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
     tracing_subscriber::registry()
@@ -80,12 +86,17 @@ async fn main() -> Result<()> {
     let (shell, shell_args) = config.spawn_command();
     let shell_args: Vec<String> = shell_args.iter().map(|s| s.to_string()).collect();
 
-    // Create terminal manager with working directory
+    // Create shared token holder for JWT (used by terminal data connections)
+    let shared_token: SharedToken = Arc::new(RwLock::new(relay_token.clone()));
+
+    // Create terminal manager with working directory and shared token
     let (terminal_manager, mut terminal_event_rx) = TerminalManager::new(
         config.relay_url.clone(),
         shell.to_string(),
         shell_args,
         config.working_dir.clone(),
+        shared_token.clone(),
+        config.sandbox,
     );
 
     // Handle graceful shutdown
@@ -96,9 +107,28 @@ async fn main() -> Result<()> {
     let mut reconnect_mgr = ReconnectManager::new();
 
     // Main loop with reconnection support
-    let current_relay_token = relay_token;
+    let mut current_relay_token = relay_token;
+    let mut needs_token_refresh = false;
 
     'main: loop {
+        // Refresh JWT token if needed (after abnormal disconnection)
+        if needs_token_refresh {
+            info!("refreshing relay token before reconnection");
+            match get_relay_token(&config.relay_url, &auth.access_token).await {
+                Ok(new_token) => {
+                    current_relay_token = new_token.clone();
+                    // Update shared token for terminal data connections
+                    *shared_token.write().await = new_token;
+                    needs_token_refresh = false;
+                    info!("relay token refreshed successfully");
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to refresh relay token, will retry");
+                    // Continue with old token, might still work
+                }
+            }
+        }
+
         // Connect to control endpoint
         let handshake_info = HandshakeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -121,7 +151,20 @@ async fn main() -> Result<()> {
                 result
             }
             Err(e) => {
+                let error_str = e.to_string();
                 error!(error = %e, "failed to connect to control endpoint");
+
+                // Check if this looks like an auth error (HTTP 401 or WebSocket 4401)
+                let is_auth_error = error_str.contains("401")
+                    || error_str.contains("4401")
+                    || error_str.contains("Unauthorized")
+                    || error_str.contains("authorization")
+                    || error_str.contains("token");
+
+                if is_auth_error {
+                    info!("connection failed with auth error, will refresh JWT token");
+                    needs_token_refresh = true;
+                }
 
                 if !config.reconnect {
                     error!("reconnection disabled, exiting");
@@ -153,20 +196,21 @@ async fn main() -> Result<()> {
                 // Handle control events from relay
                 event = control_event_rx.recv() => {
                     match event {
-                        Some(ControlEvent::StartTerminal { name, cols, rows, request_id }) => {
-                            match terminal_manager.start_terminal(name.clone(), cols, rows).await {
-                                Ok(()) => {
+                        Some(ControlEvent::StartTerminal { name: _, cols, rows, request_id }) => {
+                            // Name is ignored - we use the PID as the terminal name
+                            match terminal_manager.start_terminal(cols, rows).await {
+                                Ok(terminal_name) => {
                                     let _ = control_conn.terminal_started(
-                                        name,
+                                        terminal_name,
                                         request_id,
                                         true,
                                         None,
                                     ).await;
                                 }
                                 Err(e) => {
-                                    error!(error = %e, name = %name, "failed to start terminal");
+                                    error!(error = %e, "failed to start terminal");
                                     let _ = control_conn.terminal_started(
-                                        name,
+                                        String::new(), // No name on failure
                                         request_id,
                                         false,
                                         Some(e.to_string()),
@@ -181,12 +225,24 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        Some(ControlEvent::Disconnected) => {
-                            warn!("control connection lost");
+                        Some(ControlEvent::Disconnected { close_code, clean }) => {
+                            warn!(close_code = ?close_code, clean, "control connection lost");
 
                             if !config.reconnect {
                                 info!("reconnection disabled, exiting");
                                 break 'main;
+                            }
+
+                            // Refresh JWT if:
+                            // 1. Connection was not cleanly closed (server crash, network issue)
+                            // 2. Close code indicates auth error (4401)
+                            if !clean || close_code == Some(4401) {
+                                info!(
+                                    clean,
+                                    close_code = ?close_code,
+                                    "will refresh JWT token before reconnection"
+                                );
+                                needs_token_refresh = true;
                             }
 
                             let delay = reconnect_mgr.next_delay();
@@ -241,7 +297,13 @@ async fn main() -> Result<()> {
 
                 // Handle shutdown signal
                 _ = &mut shutdown => {
-                    info!("received shutdown signal");
+                    info!("received shutdown signal, initiating graceful shutdown");
+                    // First shutdown all terminals (sends close frames on data connections)
+                    terminal_manager.shutdown_all().await;
+                    // Then shutdown control connection
+                    control_conn.shutdown().await;
+                    // Give a moment for the close frames to be sent
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     break 'main;
                 }
             }

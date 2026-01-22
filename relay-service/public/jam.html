@@ -163,8 +163,13 @@
       background: #2d2d2d;
       border-bottom: 1px solid #444;
     }
-    .session-select {
+    /* Custom session dropdown */
+    .session-dropdown {
       flex: 1;
+      position: relative;
+    }
+    .session-dropdown-btn {
+      width: 100%;
       padding: 4px 8px;
       background: #1e1e1e;
       border: 1px solid #444;
@@ -172,10 +177,148 @@
       color: #d4d4d4;
       font-size: 12px;
       font-family: monospace;
+      text-align: left;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
-    .session-select:focus {
-      outline: none;
-      border-color: #1f6feb;
+    .session-dropdown-btn:hover {
+      border-color: #555;
+    }
+    .session-dropdown-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .session-dropdown-btn .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .session-dropdown-btn .status-dot.live { background: #10b981; }
+    .session-dropdown-btn .status-dot.offline { background: #ef4444; }
+    .session-dropdown-btn .status-dot.closed { background: #666; }
+    .session-dropdown-btn .session-label.closed {
+      opacity: 0.5;
+    }
+    .session-dropdown-btn .session-label {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-dropdown-btn .session-host {
+      color: #888;
+      font-weight: normal;
+    }
+    .session-dropdown-btn .session-path {
+      color: #58a6ff;
+      font-weight: 500;
+    }
+    .session-dropdown-btn .arrow {
+      color: #666;
+      font-size: 10px;
+    }
+    .session-dropdown-menu {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      margin-top: 2px;
+      background: #2d2d2d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      max-height: 300px;
+      overflow-y: auto;
+      z-index: 100;
+    }
+    .session-dropdown.open .session-dropdown-menu {
+      display: block;
+    }
+    .session-dropdown-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: monospace;
+    }
+    .session-dropdown-item:hover {
+      background: #383838;
+    }
+    .session-dropdown-item.not-in-jam {
+      opacity: 0.5;
+    }
+    .session-dropdown-item.not-in-jam:hover {
+      opacity: 0.8;
+    }
+    .session-dropdown-item .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .session-dropdown-item .status-dot.live { background: #10b981; }
+    .session-dropdown-item .status-dot.offline { background: #ef4444; }
+    .session-dropdown-item .status-dot.closed { background: #666; }
+    .session-dropdown-item.closed-session {
+      opacity: 0.5;
+    }
+    .session-dropdown-item.closed-session:hover {
+      opacity: 0.7;
+    }
+    .session-dropdown-item.disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .session-dropdown-item.disabled:hover {
+      background: inherit;
+    }
+    .session-dropdown-item .session-info {
+      flex: 1;
+      overflow: hidden;
+    }
+    .session-dropdown-item .session-id {
+      color: #d4d4d4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-dropdown-item .session-owner {
+      font-size: 10px;
+      color: #888;
+    }
+    .session-dropdown-item .remove-btn {
+      padding: 2px 6px;
+      background: transparent;
+      border: none;
+      color: #888;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      border-radius: 3px;
+    }
+    .session-dropdown-item .remove-btn:hover {
+      background: #ef4444;
+      color: white;
+    }
+    .session-dropdown-item .add-hint {
+      font-size: 10px;
+      color: #666;
+    }
+    .session-dropdown-divider {
+      height: 1px;
+      background: #444;
+      margin: 4px 0;
+    }
+    .session-dropdown-label {
+      padding: 4px 8px;
+      font-size: 10px;
+      color: #666;
+      text-transform: uppercase;
     }
     .panel-mode {
       font-size: 10px;
@@ -327,7 +470,6 @@
       </div>
       <div class="top-bar-right">
         <button class="btn btn-primary" id="invite-btn">Invite</button>
-        <button class="btn" id="add-session-btn">Add Session</button>
         <div id="status" class="connecting" title="Connecting..."></div>
         <div class="user-info" id="user-info"></div>
       </div>
@@ -336,9 +478,13 @@
     <div id="terminals-container">
       <div id="panel-left" class="panel">
         <div class="panel-header">
-          <select class="session-select" id="select-left">
-            <option value="">Select session...</option>
-          </select>
+          <div class="session-dropdown" id="dropdown-left">
+            <button class="session-dropdown-btn" id="dropdown-btn-left">
+              <span class="session-label">Select session...</span>
+              <span class="arrow">▼</span>
+            </button>
+            <div class="session-dropdown-menu" id="dropdown-menu-left"></div>
+          </div>
           <span class="panel-mode readonly" id="mode-left">readonly</span>
         </div>
         <div id="terminal-left" class="terminal-container"></div>
@@ -346,9 +492,13 @@
       <div id="divider" class="divider"></div>
       <div id="panel-right" class="panel">
         <div class="panel-header">
-          <select class="session-select" id="select-right">
-            <option value="">Select session...</option>
-          </select>
+          <div class="session-dropdown" id="dropdown-right">
+            <button class="session-dropdown-btn" id="dropdown-btn-right">
+              <span class="session-label">Select session...</span>
+              <span class="arrow">▼</span>
+            </button>
+            <div class="session-dropdown-menu" id="dropdown-menu-right"></div>
+          </div>
           <span class="panel-mode readonly" id="mode-right">readonly</span>
         </div>
         <div id="terminal-right" class="terminal-container"></div>
@@ -368,19 +518,6 @@
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeInviteModal()">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Add Session Modal -->
-  <div class="modal-overlay" id="add-session-modal">
-    <div class="modal">
-      <h2>Add Session to Jam</h2>
-      <div class="modal-peers" id="add-session-list">
-        <div class="no-peers">Loading your sessions...</div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn" onclick="closeAddSessionModal()">Cancel</button>
       </div>
     </div>
   </div>

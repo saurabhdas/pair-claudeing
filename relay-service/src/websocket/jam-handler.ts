@@ -9,7 +9,7 @@
 
 import type { WebSocket } from 'ws';
 import { createChildLogger } from '../utils/logger.js';
-import type { SessionManager } from '../session/index.js';
+import type { SessionManager, SessionClosedEvent, SessionOfflineEvent, SessionOnlineEvent } from '../session/index.js';
 import type { GitHubUser } from '../server/auth-routes.js';
 import {
   getJam,
@@ -20,8 +20,10 @@ import {
   removeJamSession,
   isSessionInJam,
   setJamPanelState,
-  getAllJamPanelStates,
+  getJamPanelStates,
   getJamPendingInvitations,
+  markJamSessionClosed,
+  markJamSessionOnline,
   type JamPanelState,
   type JamInvitation,
 } from '../db/index.js';
@@ -74,7 +76,6 @@ interface JamStateMessage {
     role: string;
     joinedAt: string;
     online: boolean;
-    panelStates?: JamPanelState[];
   }>;
   sessions: Array<{
     sessionId: string;
@@ -86,12 +87,25 @@ interface JamStateMessage {
     hostname?: string;
     workingDir?: string;
   }>;
+  // User's own sessions (for "Your sessions" dropdown)
+  userSessions: Array<{
+    id: string;
+    state: string;
+    controlConnected: boolean;
+    hostname?: string;
+    workingDir?: string;
+  }>;
   pendingInvitations: Array<{
     id: string;
     to: { id: number; login: string };
     from: { id: number; login: string; avatar_url: string };
     createdAt: string;
   }>;
+  // Shared panel state (same view for all participants)
+  panelStates: {
+    left: { sessionId: string | null; terminalName: string } | null;
+    right: { sessionId: string | null; terminalName: string } | null;
+  };
 }
 
 interface ParticipantUpdateMessage {
@@ -123,17 +137,23 @@ interface SessionPoolUpdateMessage {
 
 interface PanelStateUpdateMessage {
   type: 'panel_state_update';
-  userId: number;
-  login: string;
   panel: 'left' | 'right';
   sessionId: string | null;
-  terminalName: string;
 }
 
 interface ErrorMessage {
   type: 'error';
   error: string;
   code: string;
+}
+
+interface SessionStatusUpdateMessage {
+  type: 'session_status_update';
+  sessionId: string;
+  status: 'online' | 'offline' | 'closed';
+  reason?: 'graceful' | 'timeout' | 'error';
+  hostname?: string;
+  workingDir?: string;
 }
 
 // ============================================================================
@@ -190,6 +210,11 @@ class JamConnectionManager {
     if (client.ws.readyState === 1) {
       client.ws.send(JSON.stringify(message));
     }
+  }
+
+  /** Get all active jam IDs and their connected clients */
+  getAllJams(): Map<string, Set<JamClient>> {
+    return this.jams;
   }
 }
 
@@ -287,28 +312,60 @@ function sendJamState(client: JamClient, sessionManager: SessionManager): void {
   const jam = getJam(jamId)!;
   const participants = getJamParticipants(jamId);
   const sessions = getJamSessions(jamId);
-  const panelStates = getAllJamPanelStates(jamId);
+  const panelStatesArray = getJamPanelStates(jamId);
   const pendingInvitations = getJamPendingInvitations(jamId);
 
-  // Enrich participants with online status and panel states
+  // Enrich participants with online status
   const enrichedParticipants = participants.map(p => ({
     ...p,
     online: manager.isUserOnline(jamId, p.userId),
-    panelStates: panelStates.get(p.userId) || [],
   }));
 
   // Enrich sessions with live status
   const enrichedSessions = sessions.map(s => {
     const liveSession = sessionManager.getSession(s.sessionId);
+    const controlConnected = liveSession?.hasControl() ?? false;
+
+    // Determine state:
+    // - If live and connected → use live session state
+    // - If not connected:
+    //   - If closed gracefully (Ctrl+C) → 'CLOSED' (gray dot)
+    //   - Otherwise (timeout/error/kill) → 'OFFLINE' (red dot)
+    let state: string;
+    if (liveSession && controlConnected) {
+      state = liveSession.state;
+    } else if (s.closedGracefully) {
+      state = 'CLOSED';
+    } else {
+      state = 'OFFLINE';
+    }
+
     return {
       ...s,
-      isLive: !!liveSession,
-      state: liveSession?.state || 'OFFLINE',
+      isLive: controlConnected,
+      state,
       terminals: liveSession ? Array.from(liveSession.terminals.values()).map(t => ({ name: t.name })) : [],
-      hostname: liveSession?.controlHandshake?.hostname,
-      workingDir: liveSession?.controlHandshake?.workingDir,
+      // Use live session info if available, otherwise fall back to stored DB values
+      hostname: liveSession?.controlHandshake?.hostname || s.hostname,
+      workingDir: liveSession?.controlHandshake?.workingDir || s.workingDir,
     };
   });
+
+  // Get user's own sessions (for "Your sessions" dropdown)
+  const allSessions = sessionManager.listSessions();
+  const userSessions = allSessions
+    .filter(s => s.owner?.userId === user.id.toString())
+    .map(s => ({
+      id: s.id,
+      state: s.state,
+      controlConnected: s.controlConnected,
+      hostname: s.controlHandshake?.hostname,
+      workingDir: s.controlHandshake?.workingDir,
+    }));
+
+  // Convert panel states array to object
+  const leftState = panelStatesArray.find(p => p.panel === 'left');
+  const rightState = panelStatesArray.find(p => p.panel === 'right');
 
   const stateMessage: JamStateMessage = {
     type: 'jam_state',
@@ -320,12 +377,17 @@ function sendJamState(client: JamClient, sessionManager: SessionManager): void {
     },
     participants: enrichedParticipants,
     sessions: enrichedSessions,
+    userSessions,
     pendingInvitations: pendingInvitations.map(inv => ({
       id: inv.id,
       to: inv.to,
       from: inv.from,
       createdAt: inv.createdAt,
     })),
+    panelStates: {
+      left: leftState ? { sessionId: leftState.sessionId, terminalName: leftState.terminalName } : null,
+      right: rightState ? { sessionId: rightState.sessionId, terminalName: rightState.terminalName } : null,
+    },
   };
 
   manager.send(client, stateMessage);
@@ -358,7 +420,8 @@ function handleMessage(
 
 function handlePanelSelect(client: JamClient, message: PanelSelectMessage): void {
   const { jamId, user } = client;
-  const { panel, sessionId, terminalName = 'main' } = message;
+  const { panel, sessionId } = message;
+  // terminalName is no longer used - terminals are named by PID and assigned on connection
 
   // Validate panel
   if (panel !== 'left' && panel !== 'right') {
@@ -366,19 +429,31 @@ function handlePanelSelect(client: JamClient, message: PanelSelectMessage): void
     return;
   }
 
-  // Save panel state
-  setJamPanelState(jamId, user.id, panel, sessionId, terminalName);
+  // Check access control
+  const jam = getJam(jamId)!;
+  const isOwner = jam.owner.id === user.id;
 
-  log.debug({ jamId, user: user.login, panel, sessionId, terminalName }, 'panel state updated');
+  // Owner controls left panel, participants control right panel
+  if (panel === 'left' && !isOwner) {
+    manager.send(client, { type: 'error', error: 'Only the owner can change the left panel', code: 'NOT_OWNER' });
+    return;
+  }
+  if (panel === 'right' && isOwner) {
+    manager.send(client, { type: 'error', error: 'The owner cannot change the right panel', code: 'OWNER_CANNOT_CHANGE_RIGHT' });
+    return;
+  }
 
-  // Broadcast to all participants
+  // Save shared panel state (terminalName stored as 'default' - actual name assigned on connection)
+  setJamPanelState(jamId, panel, sessionId, 'default');
+
+  log.debug({ jamId, user: user.login, panel, sessionId }, 'shared panel state updated');
+
+  // Broadcast to all participants (including sender for confirmation)
+  // terminalName is no longer broadcast - determined on connection
   const updateMessage: PanelStateUpdateMessage = {
     type: 'panel_state_update',
-    userId: user.id,
-    login: user.login,
     panel,
     sessionId,
-    terminalName,
   };
 
   manager.broadcast(jamId, updateMessage);
@@ -410,10 +485,12 @@ function handleAddSession(
     return;
   }
 
-  // Add session
-  const jamSession = addJamSession(jamId, sessionId, user.id, user.login);
+  // Add session (store hostname/workingDir in DB for persistence)
+  const hostname = session.controlHandshake?.hostname;
+  const workingDir = session.controlHandshake?.workingDir;
+  const jamSession = addJamSession(jamId, sessionId, user.id, user.login, hostname, workingDir);
 
-  log.info({ jamId, sessionId, user: user.login }, 'session added to jam via WebSocket');
+  log.info({ jamId, sessionId, user: user.login, hostname }, 'session added to jam via WebSocket');
 
   // Broadcast to all participants
   const updateMessage: SessionPoolUpdateMessage = {
@@ -424,8 +501,8 @@ function handleAddSession(
       isLive: true,
       state: session.state,
       terminals: Array.from(session.terminals.values()).map(t => ({ name: t.name })),
-      hostname: session.controlHandshake?.hostname,
-      workingDir: session.controlHandshake?.workingDir,
+      hostname,
+      workingDir,
     },
   };
 
@@ -469,6 +546,156 @@ function handleRemoveSession(
   };
 
   manager.broadcast(jamId, updateMessage);
+}
+
+// ============================================================================
+// Session Status Updates
+// ============================================================================
+
+/**
+ * Find all jam IDs that should receive a session status update.
+ * Includes jams that have the session in their pool OR where the owner is connected.
+ */
+function findJamsForSession(sessionId: string, ownerId: string | null): Set<string> {
+  const activeJamIds = new Set<string>();
+  const allJams = manager.getAllJams();
+
+  log.debug({ sessionId, ownerId, jamCount: allJams.size }, 'finding jams for session');
+
+  for (const [jamId, clients] of allJams.entries()) {
+    // Check if session is in this jam's pool
+    const inPool = isSessionInJam(jamId, sessionId);
+    if (inPool) {
+      log.debug({ jamId, sessionId }, 'session is in jam pool');
+      activeJamIds.add(jamId);
+    }
+
+    // Check if session owner is connected to this jam
+    if (ownerId) {
+      for (const client of clients) {
+        const clientUserId = client.user.id.toString();
+        if (clientUserId === ownerId) {
+          log.debug({ jamId, sessionId, ownerId, clientUserId }, 'owner is connected to jam');
+          activeJamIds.add(jamId);
+          break;
+        }
+      }
+    }
+  }
+
+  log.debug({ sessionId, foundJams: Array.from(activeJamIds) }, 'found jams for session');
+  return activeJamIds;
+}
+
+/**
+ * Handle a session coming online (control connected and handshake received).
+ */
+function handleSessionOnline(event: SessionOnlineEvent): void {
+  const { sessionId, ownerId, ownerUsername, hostname, workingDir } = event;
+
+  log.info({ sessionId, ownerId, ownerUsername, hostname }, 'handling session online event');
+
+  // Reset closed state in DB (in case session is reconnecting)
+  markJamSessionOnline(sessionId);
+
+  const statusMessage: SessionStatusUpdateMessage = {
+    type: 'session_status_update',
+    sessionId,
+    status: 'online',
+    hostname,
+    workingDir,
+  };
+
+  const activeJamIds = findJamsForSession(sessionId, ownerId);
+
+  log.info({ sessionId, jamCount: activeJamIds.size, jams: Array.from(activeJamIds) }, 'broadcasting session online');
+
+  for (const jamId of activeJamIds) {
+    log.info({ jamId, sessionId }, 'sending session_status_update (online) to jam');
+    manager.broadcast(jamId, statusMessage);
+  }
+}
+
+/**
+ * Handle a session going offline (control disconnected, waiting for reconnect).
+ */
+function handleSessionOffline(event: SessionOfflineEvent): void {
+  const { sessionId, ownerId, hostname, workingDir } = event;
+
+  log.info({ sessionId, ownerId, hostname }, 'handling session offline event');
+
+  const statusMessage: SessionStatusUpdateMessage = {
+    type: 'session_status_update',
+    sessionId,
+    status: 'offline',
+    hostname,
+    workingDir,
+  };
+
+  const activeJamIds = findJamsForSession(sessionId, ownerId);
+
+  log.info({ sessionId, jamCount: activeJamIds.size, jams: Array.from(activeJamIds) }, 'broadcasting session offline');
+
+  for (const jamId of activeJamIds) {
+    log.info({ jamId, sessionId }, 'sending session_status_update to jam');
+    manager.broadcast(jamId, statusMessage);
+  }
+}
+
+/**
+ * Handle a session being closed. Broadcasts to:
+ * - All jams that have this session in their pool
+ * - All jams where the session owner is a participant (for their "Your sessions" list)
+ *
+ * Only graceful closes show as 'closed' (gray). Timeout/error show as 'offline' (red).
+ */
+function handleSessionClosed(event: SessionClosedEvent): void {
+  const { sessionId, ownerId, hostname, workingDir, reason } = event;
+
+  // Only graceful shutdown should show as "closed" (gray dot)
+  // Timeout and error should show as "offline" (red dot) - same as network drop
+  const status = reason === 'graceful' ? 'closed' : 'offline';
+
+  // Persist the closed state in DB so it survives page refresh
+  markJamSessionClosed(sessionId, reason === 'graceful');
+
+  log.info({ sessionId, ownerId, reason, status }, 'broadcasting session closed to jams');
+
+  const statusMessage: SessionStatusUpdateMessage = {
+    type: 'session_status_update',
+    sessionId,
+    status,
+    reason,
+    hostname,
+    workingDir,
+  };
+
+  const activeJamIds = findJamsForSession(sessionId, ownerId);
+
+  for (const jamId of activeJamIds) {
+    log.debug({ jamId, sessionId, status }, 'broadcasting session status update to jam');
+    manager.broadcast(jamId, statusMessage);
+  }
+}
+
+/**
+ * Set up event listeners for session manager events.
+ * Call this once during server initialization.
+ */
+export function setupSessionEventListeners(sessionManager: SessionManager): void {
+  sessionManager.on('sessionOnline', (event: SessionOnlineEvent) => {
+    handleSessionOnline(event);
+  });
+
+  sessionManager.on('sessionOffline', (event: SessionOfflineEvent) => {
+    handleSessionOffline(event);
+  });
+
+  sessionManager.on('sessionClosed', (event: SessionClosedEvent) => {
+    handleSessionClosed(event);
+  });
+
+  log.info('session event listeners registered');
 }
 
 // Export manager for external access (e.g., for notifying when sessions go offline)
