@@ -976,10 +976,16 @@
 
     if (terminals.length > 0) {
       html += '<div class="session-dropdown-label">In this jam</div>';
+      const currentSelection = panel === 'left' ? leftSelection : rightSelection;
+
       terminals.forEach(t => {
         const isMine = t.addedBy.userId === currentUser.id;
         const statusClass = t.isClosed ? 'closed' : (t.isLive ? 'live' : 'offline');
-        const itemClass = t.isClosed ? 'session-dropdown-item closed-session' : 'session-dropdown-item';
+        const isSelected = currentSelection.sessionId === t.sessionId && currentSelection.terminalName === t.terminalName;
+        let itemClass = t.isClosed ? 'session-dropdown-item closed-session' : 'session-dropdown-item';
+        if (isSelected) {
+          itemClass += ' selected';
+        }
 
         // Format: "@username: PID xxx" and "hostname" on second line
         const pidDisplay = t.terminalName ? `PID ${t.terminalName}` : 'waiting...';
@@ -1154,14 +1160,8 @@
     // Connect to the specific terminal
     connectTerminal(panel, sessionId, terminalName);
 
-    // Also broadcast the session selection so others know
-    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
-      jamWs.send(JSON.stringify({
-        type: 'panel_select',
-        panel,
-        sessionId,
-      }));
-    }
+    // Note: We don't broadcast panel_select here because terminal selection is local.
+    // Each user can view different terminals. Only session addition is shared.
   }
 
   // =========================================================================
