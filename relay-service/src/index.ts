@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { SessionManager } from './session/index.js';
 import { createServer, startServer } from './server/index.js';
 import { logger, createChildLogger } from './utils/logger.js';
+import { initDatabase, closeDatabase } from './db/index.js';
 
 const log = createChildLogger('main');
 
@@ -15,6 +16,9 @@ async function main(): Promise<void> {
   // Load configuration
   const config = loadConfig();
   log.info({ config }, 'configuration loaded');
+
+  // Initialize database
+  initDatabase();
 
   // Create session manager
   const sessionManager = new SessionManager(config);
@@ -34,6 +38,7 @@ async function main(): Promise<void> {
 
     try {
       await server.close();
+      closeDatabase();
       log.info('server closed');
       process.exit(0);
     } catch (error) {

@@ -12,8 +12,11 @@ import { SessionManager } from '../session/index.js';
 import { handleBrowserConnection } from '../websocket/browser-handler.js';
 import { handleControlConnection } from '../websocket/control-handler.js';
 import { handleTerminalDataConnection } from '../websocket/terminal-data-handler.js';
+import { handleJamConnection } from '../websocket/jam-handler.js';
 import { registerHttpRoutes } from './http-routes.js';
 import { registerAuthRoutes, getUser } from './auth-routes.js';
+import { registerPeerRoutes } from './peer-routes.js';
+import { registerJamRoutes } from './jam-routes.js';
 import { createChildLogger } from '../utils/logger.js';
 import type { Config } from '../config.js';
 
@@ -80,8 +83,26 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return reply.sendFile('index.html');
   });
 
+  // Jam page route
+  // URL format: /jam/<jamId>
+  // Requires authentication
+  fastify.get('/jam/:jamId', async (request, reply) => {
+    const user = getUser(request);
+    if (!user) {
+      const returnTo = encodeURIComponent(request.url);
+      return reply.redirect(`/login?returnTo=${returnTo}`);
+    }
+    return reply.sendFile('jam.html');
+  });
+
   // Register HTTP routes
   await registerHttpRoutes(fastify, { sessionManager });
+
+  // Register peer routes
+  await registerPeerRoutes(fastify, { sessionManager });
+
+  // Register jam routes
+  await registerJamRoutes(fastify, { sessionManager });
 
   // WebSocket route for paircoded CONTROL connections
   fastify.get<{ Params: { sessionId: string } }>(
@@ -101,8 +122,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     { websocket: true },
     (socket, request) => {
       const { sessionId, terminalName } = request.params;
-      log.info({ sessionId, terminalName, remoteAddress: request.ip }, 'terminal data WebSocket connection');
-      handleTerminalDataConnection(socket, sessionId, terminalName, { sessionManager });
+      const authHeader = request.headers.authorization;
+      log.info({ sessionId, terminalName, remoteAddress: request.ip, hasAuth: !!authHeader }, 'terminal data WebSocket connection');
+      handleTerminalDataConnection(socket, sessionId, terminalName, { sessionManager, config, authHeader });
     }
   );
 
@@ -114,6 +136,25 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       const { sessionId } = request.params;
       log.info({ sessionId, remoteAddress: request.ip }, 'browser WebSocket connection');
       handleBrowserConnection(socket, sessionId, { sessionManager });
+    }
+  );
+
+  // WebSocket route for jam connections
+  fastify.get<{ Params: { jamId: string } }>(
+    '/ws/jam/:jamId',
+    { websocket: true },
+    (socket, request) => {
+      const { jamId } = request.params;
+      const user = getUser(request);
+      log.info({ jamId, remoteAddress: request.ip, user: user?.login }, 'jam WebSocket connection');
+
+      if (!user) {
+        socket.send(JSON.stringify({ type: 'error', error: 'Not authenticated', code: 'NOT_AUTHENTICATED' }));
+        socket.close();
+        return;
+      }
+
+      handleJamConnection(socket, jamId, user, { sessionManager });
     }
   );
 
