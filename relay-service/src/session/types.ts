@@ -27,6 +27,14 @@ export interface ClientState {
 }
 
 /**
+ * Information about who created a terminal.
+ */
+export interface TerminalCreator {
+  userId: string;     // GitHub user ID
+  username: string;   // GitHub username
+}
+
+/**
  * Represents a single terminal instance within a session.
  */
 export interface Terminal {
@@ -37,6 +45,7 @@ export interface Terminal {
   interactiveClients: Map<WebSocket, ClientState>;
   mirrorClients: Map<WebSocket, ClientState>;
   handshake: HandshakeMessage | null;
+  createdBy: TerminalCreator | null;  // Who created this terminal (has write access)
 }
 
 /**
@@ -50,6 +59,8 @@ export interface PendingTerminalRequest {
   createdAt: number;
   /** Callback to set the actual terminal name once paircoded responds */
   onTerminalNameAssigned?: (name: string) => void;
+  /** Who is creating this terminal (has write access) */
+  createdBy: TerminalCreator | null;
 }
 
 /**
@@ -91,6 +102,7 @@ export interface TerminalInfo {
   interactiveCount: number;
   mirrorCount: number;
   hasDataConnection: boolean;
+  createdBy: TerminalCreator | null;
 }
 
 export interface ControlHandshakeInfo {

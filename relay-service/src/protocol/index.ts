@@ -134,6 +134,11 @@ export interface BrowserSetupMessage {
   name: string;
   cols?: number;
   rows?: number;
+  /** Creator info for tracking who created the terminal (has write access) */
+  createdBy?: {
+    userId: string;
+    username: string;
+  };
 }
 
 /**

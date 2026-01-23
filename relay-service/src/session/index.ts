@@ -42,6 +42,14 @@ export interface SessionOnlineEvent {
   workingDir?: string;
 }
 
+/** Event emitted when a terminal is closed/exited */
+export interface TerminalClosedEvent {
+  sessionId: string;
+  ownerId: string | null;
+  terminalName: string;
+  exitCode: number;
+}
+
 /** Info about a closed session */
 export interface ClosedSessionInfo {
   id: string;
@@ -233,5 +241,22 @@ export class SessionManager extends EventEmitter {
     };
     this.emit('sessionOnline', onlineEvent);
     log.info({ sessionId, hostname: onlineEvent.hostname }, 'session online event emitted');
+  }
+
+  /**
+   * Notify that a terminal has been closed/exited.
+   */
+  notifyTerminalClosed(sessionId: string, terminalName: string, exitCode: number): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const closedEvent: TerminalClosedEvent = {
+      sessionId: session.id,
+      ownerId: session.owner?.userId || null,
+      terminalName,
+      exitCode,
+    };
+    this.emit('terminalClosed', closedEvent);
+    log.info({ sessionId, terminalName, exitCode }, 'terminal closed event emitted');
   }
 }

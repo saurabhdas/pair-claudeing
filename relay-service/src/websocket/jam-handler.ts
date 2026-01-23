@@ -9,7 +9,8 @@
 
 import type { WebSocket } from 'ws';
 import { createChildLogger } from '../utils/logger.js';
-import type { SessionManager, SessionClosedEvent, SessionOfflineEvent, SessionOnlineEvent } from '../session/index.js';
+import type { SessionManager, SessionClosedEvent, SessionOfflineEvent, SessionOnlineEvent, TerminalClosedEvent } from '../session/index.js';
+import { createCloseTerminalMessage } from '../protocol/index.js';
 import type { GitHubUser } from '../server/auth-routes.js';
 import {
   getJam,
@@ -58,7 +59,13 @@ interface RemoveSessionMessage {
   sessionId: string;
 }
 
-type ClientMessage = PanelSelectMessage | AddSessionMessage | RemoveSessionMessage;
+interface CloseTerminalMessage {
+  type: 'close_terminal';
+  sessionId: string;
+  terminalName: string;
+}
+
+type ClientMessage = PanelSelectMessage | AddSessionMessage | RemoveSessionMessage | CloseTerminalMessage;
 
 // Server → Client messages
 interface JamStateMessage {
@@ -83,7 +90,7 @@ interface JamStateMessage {
     addedAt: string;
     isLive: boolean;
     state: string;
-    terminals: Array<{ name: string }>;
+    terminals: Array<{ name: string; createdBy: { userId: string; username: string } | null }>;
     hostname?: string;
     workingDir?: string;
   }>;
@@ -154,6 +161,13 @@ interface SessionStatusUpdateMessage {
   reason?: 'graceful' | 'timeout' | 'error';
   hostname?: string;
   workingDir?: string;
+}
+
+interface TerminalClosedUpdateMessage {
+  type: 'terminal_closed_update';
+  sessionId: string;
+  terminalName: string;
+  exitCode: number;
 }
 
 // ============================================================================
@@ -344,7 +358,10 @@ function sendJamState(client: JamClient, sessionManager: SessionManager): void {
       ...s,
       isLive: controlConnected,
       state,
-      terminals: liveSession ? Array.from(liveSession.terminals.values()).map(t => ({ name: t.name })) : [],
+      terminals: liveSession ? Array.from(liveSession.terminals.values()).map(t => ({
+        name: t.name,
+        createdBy: t.createdBy,
+      })) : [],
       // Use live session info if available, otherwise fall back to stored DB values
       hostname: liveSession?.controlHandshake?.hostname || s.hostname,
       workingDir: liveSession?.controlHandshake?.workingDir || s.workingDir,
@@ -411,6 +428,10 @@ function handleMessage(
 
     case 'remove_session':
       handleRemoveSession(client, message, sessionManager);
+      break;
+
+    case 'close_terminal':
+      handleCloseTerminal(client, message, sessionManager);
       break;
 
     default:
@@ -548,6 +569,46 @@ function handleRemoveSession(
   manager.broadcast(jamId, updateMessage);
 }
 
+function handleCloseTerminal(
+  client: JamClient,
+  message: CloseTerminalMessage,
+  sessionManager: SessionManager
+): void {
+  const { jamId, user } = client;
+  const { sessionId, terminalName } = message;
+
+  // Verify session exists
+  const session = sessionManager.getSession(sessionId);
+  if (!session) {
+    manager.send(client, { type: 'error', error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    return;
+  }
+
+  // Only the session owner can close terminals
+  if (session.owner?.userId !== user.id.toString()) {
+    manager.send(client, { type: 'error', error: 'Not the session owner', code: 'NOT_SESSION_OWNER' });
+    return;
+  }
+
+  // Check if terminal exists
+  const terminal = session.getTerminal(terminalName);
+  if (!terminal) {
+    manager.send(client, { type: 'error', error: 'Terminal not found', code: 'TERMINAL_NOT_FOUND' });
+    return;
+  }
+
+  // Send close_terminal command to paircoded via control connection
+  if (!session.hasControl()) {
+    manager.send(client, { type: 'error', error: 'Session not connected', code: 'SESSION_NOT_CONNECTED' });
+    return;
+  }
+
+  const closeMessage = createCloseTerminalMessage(terminalName);
+  session.controlWs!.send(JSON.stringify(closeMessage));
+
+  log.info({ jamId, sessionId, terminalName, user: user.login }, 'close_terminal sent to paircoded');
+}
+
 // ============================================================================
 // Session Status Updates
 // ============================================================================
@@ -679,6 +740,30 @@ function handleSessionClosed(event: SessionClosedEvent): void {
 }
 
 /**
+ * Handle a terminal being closed/exited.
+ * Broadcasts to all jams that have this session in their pool.
+ */
+function handleTerminalClosed(event: TerminalClosedEvent, sessionManager: SessionManager): void {
+  const { sessionId, ownerId, terminalName, exitCode } = event;
+
+  log.info({ sessionId, terminalName, exitCode }, 'broadcasting terminal closed to jams');
+
+  const closedMessage: TerminalClosedUpdateMessage = {
+    type: 'terminal_closed_update',
+    sessionId,
+    terminalName,
+    exitCode,
+  };
+
+  const activeJamIds = findJamsForSession(sessionId, ownerId);
+
+  for (const jamId of activeJamIds) {
+    log.debug({ jamId, sessionId, terminalName }, 'broadcasting terminal_closed_update to jam');
+    manager.broadcast(jamId, closedMessage);
+  }
+}
+
+/**
  * Set up event listeners for session manager events.
  * Call this once during server initialization.
  */
@@ -693,6 +778,10 @@ export function setupSessionEventListeners(sessionManager: SessionManager): void
 
   sessionManager.on('sessionClosed', (event: SessionClosedEvent) => {
     handleSessionClosed(event);
+  });
+
+  sessionManager.on('terminalClosed', (event: TerminalClosedEvent) => {
+    handleTerminalClosed(event, sessionManager);
   });
 
   log.info('session event listeners registered');

@@ -131,7 +131,7 @@ function handleSetupMessage(
   state: BrowserConnectionState,
   sessionManager: SessionManager
 ): void {
-  const { action, name, cols = session.cols, rows = session.rows } = setupMsg;
+  const { action, name, cols = session.cols, rows = session.rows, createdBy } = setupMsg;
 
   log.info({
     sessionId: session.id,
@@ -185,6 +185,7 @@ function handleSetupMessage(
         state.isSetupComplete = true;
         log.debug({ sessionId: session.id, actualName }, 'terminal name assigned via callback');
       },
+      createdBy: createdBy ? { userId: createdBy.userId, username: createdBy.username } : null,
     });
 
     state.isInteractive = true;

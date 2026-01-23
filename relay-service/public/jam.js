@@ -240,12 +240,15 @@
     const selection = panel === 'left' ? leftSelection : rightSelection;
     if (!selection.sessionId) return false;
 
-    // Find the session in the pool
-    const session = jamState.sessions.find(s => s.sessionId === selection.sessionId);
-    if (!session) return false;
-
-    // Can edit if user added the session (owns it)
-    return session.addedBy.userId === currentUser.id;
+    // Access control based on panel and jam ownership:
+    // - Jam owner: left panel = editable, right panel = read-only
+    // - Participants: left panel = read-only, right panel = editable
+    const owner = isOwner();
+    if (panel === 'left') {
+      return owner;  // Only jam owner can edit left panel
+    } else {
+      return !owner; // Only participants can edit right panel
+    }
   }
 
   function updatePanelModes() {
@@ -352,6 +355,10 @@
 
       case 'session_status_update':
         handleSessionStatusUpdate(msg);
+        break;
+
+      case 'terminal_closed_update':
+        handleTerminalClosedUpdate(msg);
         break;
 
       case 'error':
@@ -509,6 +516,36 @@
     updatePanelModes();
   }
 
+  function handleTerminalClosedUpdate(msg) {
+    const { sessionId, terminalName, exitCode } = msg;
+
+    console.log('Terminal closed update:', msg);
+
+    // Remove the terminal from jamState.sessions
+    if (jamState && jamState.sessions) {
+      const session = jamState.sessions.find(s => s.sessionId === sessionId);
+      if (session && session.terminals) {
+        session.terminals = session.terminals.filter(t => t.name !== terminalName);
+        console.log(`Removed terminal ${terminalName} from session ${sessionId}`);
+      }
+    }
+
+    // If this terminal is selected in a panel, clear that panel's selection
+    if (leftSelection.sessionId === sessionId && leftSelection.terminalName === terminalName) {
+      leftSelection = { sessionId: null, terminalName: null };
+      leftSetupComplete = false;
+      updateDropdownButton('left', null);
+    }
+    if (rightSelection.sessionId === sessionId && rightSelection.terminalName === terminalName) {
+      rightSelection = { sessionId: null, terminalName: null };
+      rightSetupComplete = false;
+      updateDropdownButton('right', null);
+    }
+
+    // Update dropdowns to reflect removed terminal
+    updateSessionDropdowns();
+  }
+
   // =========================================================================
   // Terminal WebSocket Connections
   // =========================================================================
@@ -586,6 +623,11 @@
         name: name,
         cols: dims ? dims.cols : 80,
         rows: dims ? dims.rows : 24,
+        // Include creator info for new terminals
+        createdBy: action === 'new' ? {
+          userId: currentUser.id.toString(),
+          username: currentUser.login,
+        } : undefined,
       };
       ws.send(JSON.stringify(setupMsg));
       console.log(`[${panel}] Sent setup to ${sessionId}:`, setupMsg);
@@ -665,7 +707,13 @@
               }
               // Add terminal if not already present
               if (!session.terminals.find(t => t.name === actualTerminalName)) {
-                session.terminals.push({ name: actualTerminalName });
+                session.terminals.push({
+                  name: actualTerminalName,
+                  createdBy: {
+                    userId: currentUser.id.toString(),
+                    username: currentUser.login,
+                  },
+                });
                 console.log(`[${panel}] Added terminal ${actualTerminalName} to session ${sessionId}`);
               }
             }
@@ -683,6 +731,29 @@
 
       case 'exit':
         term.writeln(`\r\n\x1b[33mProcess exited with code ${msg.code}\x1b[0m`);
+
+        // Remove the terminal from local jamState
+        const exitSelection = isLeft ? leftSelection : rightSelection;
+        if (jamState && exitSelection.sessionId && exitSelection.terminalName) {
+          const exitSession = jamState.sessions.find(s => s.sessionId === exitSelection.sessionId);
+          if (exitSession && exitSession.terminals) {
+            exitSession.terminals = exitSession.terminals.filter(t => t.name !== exitSelection.terminalName);
+            console.log(`[${panel}] Removed exited terminal ${exitSelection.terminalName} from session ${exitSelection.sessionId}`);
+          }
+        }
+
+        // Clear the selection for this panel
+        if (isLeft) {
+          leftSelection = { sessionId: null, terminalName: null };
+          leftSetupComplete = false;
+        } else {
+          rightSelection = { sessionId: null, terminalName: null };
+          rightSetupComplete = false;
+        }
+
+        // Update UI
+        updateDropdownButton(panel, null);
+        updateSessionDropdowns();
         break;
 
       case 'disconnect':
@@ -939,47 +1010,39 @@
 
     const jamSessionIds = new Set(jamState.sessions.map(s => s.sessionId));
 
-    // Build list: jam terminals first, then user's sessions not in jam
+    // Build list: jam terminals, then other jam sessions (for adding terminals), then user's sessions not in jam
     let html = '';
+    const currentSelection = panel === 'left' ? leftSelection : rightSelection;
 
-    // Terminals in the jam (flatten sessions into terminals)
+    // 1. Terminals in the jam (flatten all sessions into terminals)
     const terminals = [];
     jamState.sessions.forEach(s => {
       const info = getSessionDisplayInfo(s.sessionId);
       if (s.terminals && s.terminals.length > 0) {
         // Add each terminal
         s.terminals.forEach(t => {
+          // Determine who created this terminal
+          const createdByUser = t.createdBy ? t.createdBy.username : s.addedBy.login;
+          const createdByUserId = t.createdBy ? t.createdBy.userId : s.addedBy.userId.toString();
           terminals.push({
             sessionId: s.sessionId,
             terminalName: t.name,
-            addedBy: s.addedBy,
+            createdBy: { userId: createdByUserId, username: createdByUser },
+            sessionOwner: s.addedBy,
             hostname: info.hostname || 'unknown',
             isLive: info.isLive,
             isClosed: info.isClosed,
             isOffline: info.isOffline,
           });
         });
-      } else if (info.isLive) {
-        // Session is live but no terminals yet - show as "waiting"
-        terminals.push({
-          sessionId: s.sessionId,
-          terminalName: null,
-          addedBy: s.addedBy,
-          hostname: info.hostname || 'unknown',
-          isLive: true,
-          isClosed: false,
-          isOffline: false,
-          waiting: true,
-        });
       }
     });
 
     if (terminals.length > 0) {
       html += '<div class="session-dropdown-label">In this jam</div>';
-      const currentSelection = panel === 'left' ? leftSelection : rightSelection;
 
       terminals.forEach(t => {
-        const isMine = t.addedBy.userId === currentUser.id;
+        const isMyTerminal = t.createdBy.userId === currentUser.id.toString();
         const statusClass = t.isClosed ? 'closed' : (t.isLive ? 'live' : 'offline');
         const isSelected = currentSelection.sessionId === t.sessionId && currentSelection.terminalName === t.terminalName;
         let itemClass = t.isClosed ? 'session-dropdown-item closed-session' : 'session-dropdown-item';
@@ -987,49 +1050,94 @@
           itemClass += ' selected';
         }
 
-        // Format: "@username: PID xxx" and "hostname" on second line
-        const pidDisplay = t.terminalName ? `PID ${t.terminalName}` : 'waiting...';
-        const canClick = t.terminalName !== null;
-        const onClickAttr = canClick
-          ? `onclick="selectTerminalFromDropdown('${panel}', '${t.sessionId}', '${t.terminalName}')"`
-          : '';
+        // Format: "@creator: PID xxx" and "hostname" on second line
+        const pidDisplay = `PID ${t.terminalName}`;
+        const onClickAttr = `onclick="selectTerminalFromDropdown('${panel}', '${t.sessionId}', '${t.terminalName}')"`;
 
         html += `
-          <div class="${itemClass}${canClick ? '' : ' disabled'}" data-session-id="${t.sessionId}" ${onClickAttr}>
+          <div class="${itemClass}" data-session-id="${t.sessionId}" ${onClickAttr}>
             <span class="status-dot ${statusClass}"></span>
             <div class="session-info">
-              <div class="session-id">@${t.addedBy.login}: ${pidDisplay}</div>
+              <div class="session-id">@${t.createdBy.username}: ${pidDisplay}</div>
               <div class="session-owner">${t.hostname}</div>
             </div>
-            ${isMine ? `<button class="remove-btn" onclick="event.stopPropagation(); removeSessionFromJam('${t.sessionId}')" title="Remove from jam">×</button>` : ''}
+            ${isMyTerminal ? `<button class="remove-btn" onclick="event.stopPropagation(); closeTerminal('${t.sessionId}', '${t.terminalName}')" title="Close terminal">×</button>` : ''}
           </div>
         `;
       });
     }
 
-    // User's sessions (always show all - clicking adds a new terminal)
-    const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
+    // 2. Other sessions in jam (not owned by current user) - can add terminals to them
+    const otherJamSessions = jamState.sessions.filter(s => s.addedBy.userId !== currentUser.id);
+    const liveOtherSessions = otherJamSessions.filter(s => {
+      const info = getSessionDisplayInfo(s.sessionId);
+      return info.isLive;
+    });
 
-    if (canControl && mySessions.length > 0) {
+    if (liveOtherSessions.length > 0) {
       if (terminals.length > 0) {
+        html += '<div class="session-dropdown-divider"></div>';
+      }
+      html += '<div class="session-dropdown-label">Other sessions (click to add terminal)</div>';
+      liveOtherSessions.forEach(s => {
+        const info = getSessionDisplayInfo(s.sessionId);
+        const hostname = info.hostname || 'unknown';
+        const workingDir = info.workingDir || '/';
+        html += `
+          <div class="session-dropdown-item not-in-jam" onclick="addTerminalToSession('${panel}', '${s.sessionId}')">
+            <span class="status-dot live"></span>
+            <div class="session-info">
+              <div class="session-id">@${s.addedBy.login}: ${hostname}</div>
+              <div class="session-owner">${workingDir}</div>
+            </div>
+            <span class="add-hint">+ Terminal</span>
+          </div>
+        `;
+      });
+    }
+
+    // 3. User's sessions (show all, live ones are clickable, offline ones are disabled)
+    if (mySessions.length > 0) {
+      if (terminals.length > 0 || liveOtherSessions.length > 0) {
         html += '<div class="session-dropdown-divider"></div>';
       }
       html += '<div class="session-dropdown-label">Your sessions (click to add terminal)</div>';
       mySessions.forEach(s => {
-        const isLive = s.controlConnected && (s.state === 'READY' || s.state === 'ACTIVE');
         const hostname = s.controlHandshake?.hostname || 'unknown';
         const username = s.controlHandshake?.username || '';
         const workingDir = formatWorkingDir(s.controlHandshake?.workingDir, username) || '/';
-        html += `
-          <div class="session-dropdown-item not-in-jam" onclick="addAndSelectSession('${panel}', '${s.id}')">
-            <span class="status-dot ${isLive ? 'live' : 'offline'}"></span>
-            <div class="session-info">
-              <div class="session-id">${hostname}</div>
-              <div class="session-owner">${workingDir}</div>
+        const isLive = s.controlConnected && (s.state === 'READY' || s.state === 'ACTIVE');
+        const inJam = jamSessionIds.has(s.id);
+
+        if (isLive) {
+          // Live session - clickable
+          const clickHandler = inJam
+            ? `addTerminalToSession('${panel}', '${s.id}')`
+            : `addAndSelectSession('${panel}', '${s.id}')`;
+          const hint = inJam ? '+ Terminal' : '+ Add';
+          html += `
+            <div class="session-dropdown-item ${inJam ? '' : 'not-in-jam'}" onclick="${clickHandler}">
+              <span class="status-dot live"></span>
+              <div class="session-info">
+                <div class="session-id">${hostname}</div>
+                <div class="session-owner">${workingDir}</div>
+              </div>
+              <span class="add-hint">${hint}</span>
             </div>
-            <span class="add-hint">+ Add</span>
-          </div>
-        `;
+          `;
+        } else {
+          // Offline session - show but disabled
+          html += `
+            <div class="session-dropdown-item disabled">
+              <span class="status-dot offline"></span>
+              <div class="session-info">
+                <div class="session-id">${hostname}</div>
+                <div class="session-owner">${workingDir}</div>
+              </div>
+              <span class="add-hint" style="color: #666;">offline</span>
+            </div>
+          `;
+        }
       });
     }
 
@@ -1073,6 +1181,22 @@
         sessionId
       }));
     }
+  };
+
+  window.closeTerminal = function(sessionId, terminalName) {
+    if (jamWs && jamWs.readyState === WebSocket.OPEN) {
+      jamWs.send(JSON.stringify({
+        type: 'close_terminal',
+        sessionId,
+        terminalName
+      }));
+    }
+  };
+
+  window.addTerminalToSession = function(panel, sessionId) {
+    closeAllDropdowns();
+    // Create a new terminal on an existing jam session (owned by someone else)
+    selectSession(panel, sessionId);
   };
 
   // =========================================================================

@@ -122,7 +122,7 @@ function handleControlMessage(
       break;
 
     case 'terminal_closed':
-      handleTerminalClosed(session, message);
+      handleTerminalClosed(session, message, sessionManager);
       break;
   }
 }
@@ -165,7 +165,7 @@ function handleTerminalStarted(
 
   if (message.success) {
     // Create the terminal in the session with the PID-based name from paircoded
-    session.createTerminal(message.name, request.cols, request.rows);
+    session.createTerminal(message.name, request.cols, request.rows, request.createdBy);
 
     // Update browser's terminal name via callback (so subsequent messages use correct name)
     if (request.onTerminalNameAssigned) {
@@ -194,7 +194,8 @@ function handleTerminalStarted(
 
 function handleTerminalClosed(
   session: import('../session/session.js').Session,
-  message: { type: 'terminal_closed'; name: string; exitCode: number }
+  message: { type: 'terminal_closed'; name: string; exitCode: number },
+  sessionManager: SessionManager
 ): void {
   log.info({
     sessionId: session.id,
@@ -204,7 +205,7 @@ function handleTerminalClosed(
 
   const terminal = session.getTerminal(message.name);
   if (terminal) {
-    // Notify all clients
+    // Notify all clients directly connected to this terminal
     const exitMessage = JSON.stringify({ type: 'exit', code: message.exitCode });
     for (const ws of terminal.interactiveClients.keys()) {
       if (ws.readyState === 1) {
@@ -219,6 +220,9 @@ function handleTerminalClosed(
 
     // Close the terminal
     session.closeTerminal(message.name);
+
+    // Emit event for jam participants (so they can update their dropdown lists)
+    sessionManager.notifyTerminalClosed(session.id, message.name, message.exitCode);
   }
 }
 

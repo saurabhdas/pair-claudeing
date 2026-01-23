@@ -4,7 +4,7 @@
 
 import type { WebSocket } from 'ws';
 import type { HandshakeMessage } from '../protocol/index.js';
-import { SessionState, type SessionData, type SessionInfo, type SessionOwner, type ControlHandshakeInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState } from './types.js';
+import { SessionState, type SessionData, type SessionInfo, type SessionOwner, type ControlHandshakeInfo, type Terminal, type TerminalInfo, type PendingTerminalRequest, type ClientState, type TerminalCreator } from './types.js';
 
 // HandshakeMessage is used in setTerminalHandshake method
 import { createChildLogger } from '../utils/logger.js';
@@ -92,7 +92,7 @@ export class Session implements SessionData {
   /**
    * Create a new terminal (called when paircoded starts a terminal).
    */
-  createTerminal(name: string, cols: number, rows: number): Terminal {
+  createTerminal(name: string, cols: number, rows: number, createdBy: TerminalCreator | null = null): Terminal {
     const terminal: Terminal = {
       name,
       dataWs: null,
@@ -101,6 +101,7 @@ export class Session implements SessionData {
       interactiveClients: new Map(),
       mirrorClients: new Map(),
       handshake: null,
+      createdBy,
     };
     this.terminals.set(name, terminal);
 
@@ -108,7 +109,7 @@ export class Session implements SessionData {
       this.state = SessionState.ACTIVE;
     }
 
-    log.info({ sessionId: this.id, terminalName: name, cols, rows }, 'terminal created');
+    log.info({ sessionId: this.id, terminalName: name, cols, rows, createdBy }, 'terminal created');
     return terminal;
   }
 
@@ -347,6 +348,7 @@ export class Session implements SessionData {
       interactiveCount: t.interactiveClients.size,
       mirrorCount: t.mirrorClients.size,
       hasDataConnection: t.dataWs !== null && t.dataWs.readyState === 1,
+      createdBy: t.createdBy,
     }));
 
     return {
