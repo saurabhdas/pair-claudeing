@@ -39,9 +39,12 @@
       gap: 12px;
     }
     .logo {
-      font-size: 14px;
-      font-weight: 600;
-      color: #d4d4d4;
+      display: flex;
+      align-items: center;
+    }
+    .logo img {
+      height: 28px;
+      width: auto;
     }
     .jam-id {
       font-family: monospace;
@@ -465,17 +468,35 @@
     .modal-peer .status.invited {
       color: #f59e0b;
     }
+
+    /* Right panel hidden state */
+    .right-hidden #panel-right {
+      display: none;
+    }
+    .right-hidden #divider {
+      display: none;
+    }
+    .right-hidden #panel-left {
+      flex: 1;
+      width: auto !important;
+    }
   </style>
 </head>
 <body>
   <div id="app">
     <div class="top-bar">
       <div class="top-bar-left">
-        <a href="/" class="logo">paircoded</a>
+        <a href="/" class="logo"><img src="/icon_hands_flat_small.png" alt="paircoded"></a>
         <span class="jam-id" id="jam-id">Loading...</span>
         <div class="participants" id="participants"></div>
       </div>
       <div class="top-bar-right">
+        <button class="btn" id="toggle-right-btn" title="Hide right panel">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1" y="2" width="14" height="12" rx="1"/>
+            <line x1="10" y1="2" x2="10" y2="14"/>
+          </svg>
+        </button>
         <button class="btn btn-primary" id="invite-btn">Invite</button>
         <div id="status" class="connecting" title="Connecting..."></div>
         <div class="user-info" id="user-info"></div>

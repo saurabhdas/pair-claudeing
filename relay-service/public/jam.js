@@ -102,6 +102,9 @@
     // Set up modal handlers
     setupModals();
 
+    // Set up right panel toggle
+    setupPanelToggle();
+
     // Note: User's sessions are now sent via WebSocket in jam_state
     // No polling needed - updates come via session_status_update messages
   }
@@ -240,15 +243,7 @@
     const selection = panel === 'left' ? leftSelection : rightSelection;
     if (!selection.sessionId) return false;
 
-    // Access control based on panel and jam ownership:
-    // - Jam owner: left panel = editable, right panel = read-only
-    // - Participants: left panel = read-only, right panel = editable
-    const owner = isOwner();
-    if (panel === 'left') {
-      return owner;  // Only jam owner can edit left panel
-    } else {
-      return !owner; // Only participants can edit right panel
-    }
+    return canControlPanel(panel);
   }
 
   function updatePanelModes() {
@@ -398,6 +393,9 @@
 
     updateParticipantsUI();
     updatePageTitle();
+    // Solo status may have changed - refresh panel controls
+    updatePanelModes();
+    updateSessionDropdowns();
   }
 
   function handleSessionPoolUpdate(msg) {
@@ -802,6 +800,18 @@
     return jamState && currentUser && jamState.jam.owner.id === currentUser.id;
   }
 
+  function isSolo() {
+    if (!jamState) return false;
+    const onlineCount = jamState.participants.filter(p => p.online).length;
+    return onlineCount <= 1;
+  }
+
+  function canControlPanel(panel) {
+    if (isSolo()) return true;
+    const owner = isOwner();
+    return (panel === 'left' && owner) || (panel === 'right' && !owner);
+  }
+
   function updatePanelControls() {
     // Dropdown buttons handle their own disabled state via updateDropdownButton
     // Just refresh the dropdowns
@@ -970,9 +980,7 @@
 
   function updateDropdownButton(panel, sessionId) {
     const btn = document.getElementById(`dropdown-btn-${panel}`);
-    const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
-
-    btn.disabled = !canControl;
+    btn.disabled = !canControlPanel(panel);
 
     if (!sessionId) {
       btn.innerHTML = `<span class="session-label">Select terminal...</span><span class="arrow">▼</span>`;
@@ -1227,9 +1235,7 @@
     closeAllDropdowns();
 
     if (!wasOpen) {
-      // Check if user can control this panel
-      const canControl = (panel === 'left' && isOwner()) || (panel === 'right' && !isOwner());
-      if (!canControl) return;
+      if (!canControlPanel(panel)) return;
 
       dropdown.classList.add('open');
     }
@@ -1241,10 +1247,7 @@
 
   function selectSession(panel, sessionId) {
     // Check permission locally (server will also validate)
-    const owner = isOwner();
-    const canChange = (panel === 'left' && owner) || (panel === 'right' && !owner);
-
-    if (!canChange) {
+    if (!canControlPanel(panel)) {
       return;
     }
 
@@ -1261,10 +1264,7 @@
 
   function selectTerminal(panel, sessionId, terminalName) {
     // Check permission locally
-    const owner = isOwner();
-    const canChange = (panel === 'left' && owner) || (panel === 'right' && !owner);
-
-    if (!canChange) {
+    if (!canControlPanel(panel)) {
       return;
     }
 
@@ -1336,6 +1336,39 @@
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
       }
+    });
+  }
+
+  // =========================================================================
+  // Right Panel Toggle
+  // =========================================================================
+
+  function setupPanelToggle() {
+    const btn = document.getElementById('toggle-right-btn');
+    const container = document.getElementById('terminals-container');
+
+    btn.addEventListener('click', function() {
+      container.classList.toggle('right-hidden');
+      const hidden = container.classList.contains('right-hidden');
+
+      btn.title = hidden ? 'Show right panel' : 'Hide right panel';
+
+      // Update SVG icon: when hidden, show a single-panel icon
+      if (hidden) {
+        btn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1" y="2" width="14" height="12" rx="1"/>
+          </svg>`;
+      } else {
+        btn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1" y="2" width="14" height="12" rx="1"/>
+            <line x1="10" y1="2" x2="10" y2="14"/>
+          </svg>`;
+      }
+
+      // Trigger resize so xterm refits
+      window.dispatchEvent(new Event('resize'));
     });
   }
 

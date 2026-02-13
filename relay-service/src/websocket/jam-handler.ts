@@ -454,14 +454,24 @@ function handlePanelSelect(client: JamClient, message: PanelSelectMessage): void
   const jam = getJam(jamId)!;
   const isOwner = jam.owner.id === user.id;
 
-  // Owner controls left panel, participants control right panel
-  if (panel === 'left' && !isOwner) {
-    manager.send(client, { type: 'error', error: 'Only the owner can change the left panel', code: 'NOT_OWNER' });
-    return;
+  // Solo mode: if only one user is connected, they can control both panels
+  const clients = manager.getClients(jamId);
+  const uniqueUsers = new Set<number>();
+  for (const c of clients) {
+    uniqueUsers.add(c.user.id);
   }
-  if (panel === 'right' && isOwner) {
-    manager.send(client, { type: 'error', error: 'The owner cannot change the right panel', code: 'OWNER_CANNOT_CHANGE_RIGHT' });
-    return;
+  const isSolo = uniqueUsers.size <= 1;
+
+  if (!isSolo) {
+    // Owner controls left panel, participants control right panel
+    if (panel === 'left' && !isOwner) {
+      manager.send(client, { type: 'error', error: 'Only the owner can change the left panel', code: 'NOT_OWNER' });
+      return;
+    }
+    if (panel === 'right' && isOwner) {
+      manager.send(client, { type: 'error', error: 'The owner cannot change the right panel', code: 'OWNER_CANNOT_CHANGE_RIGHT' });
+      return;
+    }
   }
 
   // Save shared panel state (terminalName stored as 'default' - actual name assigned on connection)
