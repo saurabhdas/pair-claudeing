@@ -64,9 +64,13 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return reply.sendFile('home.html');
   });
 
-  // Login page
+  // Login page - redirect to home (which handles both states)
   fastify.get('/login', async (request, reply) => {
-    return reply.sendFile('login.html');
+    const query = request.query as { returnTo?: string };
+    if (query.returnTo) {
+      return reply.redirect(`/?returnTo=${encodeURIComponent(query.returnTo)}`);
+    }
+    return reply.redirect('/');
   });
 
   // Terminal page route (serves index.html for split-view)
